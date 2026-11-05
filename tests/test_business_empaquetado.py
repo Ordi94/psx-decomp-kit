@@ -92,6 +92,11 @@ ENTRADAS_ADMITIDAS = frozenset(
         "LICENSE",
         "CHANGELOG.md",
         ".gitignore",
+        "CONTRIBUTING.md",
+        "SECURITY.md",
+        ".github",
+        ".git",
+        ".gitattributes",
         # Productos locales de las herramientas de desarrollo; el .gitignore del kit los excluye.
         ".coverage",
         ".mypy_cache",
@@ -108,3 +113,27 @@ ENTRADAS_ADMITIDAS = frozenset(
 def test_la_carpeta_del_kit_solo_contiene_lo_que_se_distribuye() -> None:
     nombres = {ruta.name for ruta in RAIZ_KIT.iterdir()}
     assert nombres <= ENTRADAS_ADMITIDAS, sorted(nombres - ENTRADAS_ADMITIDAS)
+
+
+def test_el_extra_dev_trae_las_herramientas_de_calidad(pyproject: dict[str, object]) -> None:
+    proyecto = pyproject["project"]
+    assert isinstance(proyecto, dict)
+    extra = proyecto["optional-dependencies"]["dev"]
+    herramientas = {re.split(r"[<>=!~\[ ]", d, maxsplit=1)[0] for d in extra}
+    assert {"pytest", "pytest-cov", "mypy", "ruff", "types-PyYAML", "types-requests"} <= herramientas
+
+
+def test_la_integracion_continua_cubre_linux_y_windows_con_la_misma_cadena_de_calidad() -> None:
+    flujo = (RAIZ_KIT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    for requerido in (
+        "ubuntu-latest",
+        "windows-latest",
+        '"3.13"',
+        "ruff check .",
+        "ruff format --check .",
+        "mypy",
+        "pytest",
+        "cancel-in-progress: true",
+    ):
+        assert requerido in flujo
+    assert "secrets." not in flujo
