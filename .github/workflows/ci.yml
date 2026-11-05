@@ -34,8 +34,8 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      - name: Instalar el kit con las dependencias de desarrollo
-        run: python -m pip install -e ".[dev]"
+      - name: Instalar el kit con sus extras y las dependencias de desarrollo
+        run: python -m pip install -e ".[particion,comparacion,dev]"
 
       - name: Ruff (reglas)
         run: python -m ruff check .

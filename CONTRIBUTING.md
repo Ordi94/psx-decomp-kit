@@ -3,7 +3,7 @@
 ## Entorno
 
 ```
-python -m pip install -e ".[dev]"
+python -m pip install -e ".[particion,comparacion,dev]"
 ```
 
 Antes de proponer un cambio deben pasar, sin avisos:

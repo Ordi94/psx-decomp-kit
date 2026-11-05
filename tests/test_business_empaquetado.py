@@ -5,8 +5,10 @@ import re
 import sys
 import tomllib
 from pathlib import Path
+from typing import Any
 
 import pytest
+import yaml
 
 RAIZ_KIT = Path(__file__).resolve().parents[1]
 PAQUETE = RAIZ_KIT / "psxdecomp"
@@ -123,9 +125,18 @@ def test_el_extra_dev_trae_las_herramientas_de_calidad(pyproject: dict[str, obje
     assert {"pytest", "pytest-cov", "mypy", "ruff", "types-PyYAML", "types-requests"} <= herramientas
 
 
-def test_la_integracion_continua_cubre_linux_y_windows_con_la_misma_cadena_de_calidad() -> None:
-    flujo = (RAIZ_KIT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-    for requerido in (
+COMANDO_INSTALACION = 'python -m pip install -e ".[particion,comparacion,dev]"'
+FLUJO_CI = RAIZ_KIT / ".github" / "workflows" / "ci.yml"
+
+
+@pytest.fixture(scope="module")
+def flujo_ci() -> str:
+    return FLUJO_CI.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "requerido",
+    [
         "ubuntu-latest",
         "windows-latest",
         '"3.13"',
@@ -134,6 +145,49 @@ def test_la_integracion_continua_cubre_linux_y_windows_con_la_misma_cadena_de_ca
         "mypy",
         "pytest",
         "cancel-in-progress: true",
-    ):
-        assert requerido in flujo
-    assert "secrets." not in flujo
+    ],
+)
+def test_la_integracion_continua_cubre_linux_y_windows_con_la_misma_cadena_de_calidad(
+    flujo_ci: str, requerido: str
+) -> None:
+    assert requerido in flujo_ci
+
+
+def test_la_integracion_continua_no_usa_secretos(flujo_ci: str) -> None:
+    assert "secrets." not in flujo_ci
+
+
+def test_el_token_de_la_integracion_continua_es_de_solo_lectura(flujo_ci: str) -> None:
+    flujo = yaml.safe_load(flujo_ci)
+    assert flujo["permissions"] == {"contents": "read"}
+
+
+def test_la_integracion_continua_publica_el_informe_de_cobertura(flujo_ci: str) -> None:
+    flujo = yaml.safe_load(flujo_ci)
+    pasos = flujo["jobs"]["calidad"]["steps"]
+    publicacion = [p for p in pasos if str(p.get("uses", "")).startswith("actions/upload-artifact@")]
+    assert len(publicacion) == 1
+    assert publicacion[0]["with"]["path"] == "coverage.xml"
+
+
+@pytest.mark.parametrize("documento", [".github/workflows/ci.yml", "README.md", "CONTRIBUTING.md"])
+def test_el_comando_de_instalacion_es_el_mismo_en_la_ci_y_en_la_documentacion(documento: str) -> None:
+    assert COMANDO_INSTALACION in (RAIZ_KIT / documento).read_text(encoding="utf-8")
+
+
+def test_mypy_se_ejecuta_en_modo_estricto(pyproject: dict[str, Any]) -> None:
+    assert pyproject["tool"]["mypy"]["strict"] is True
+
+
+def test_la_cobertura_exige_el_cien_por_ciento_de_lineas_y_ramas(pyproject: dict[str, Any]) -> None:
+    herramientas = pyproject["tool"]
+    assert herramientas["coverage"]["report"]["fail_under"] == 100
+    assert herramientas["coverage"]["run"]["branch"] is True
+    addopts = herramientas["pytest"]["ini_options"]["addopts"]
+    assert "--cov-fail-under=100" in addopts
+    assert "--cov-branch" in addopts
+
+
+def test_los_finales_de_linea_se_normalizan_a_lf() -> None:
+    atributos = (RAIZ_KIT / ".gitattributes").read_text(encoding="utf-8")
+    assert "eol=lf" in atributos.split()
