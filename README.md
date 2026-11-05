@@ -1,5 +1,7 @@
 # psx-decomp-kit
 
+[![CI](https://github.com/Ordi94/psx-decomp-kit/actions/workflows/ci.yml/badge.svg)](https://github.com/Ordi94/psx-decomp-kit/actions/workflows/ci.yml)
+
 Herramientas para descompilar juegos de PlayStation 1 hasta obtener C que, compilado con el
 compilador original del SDK, reproduce el ejecutable byte a byte (descompilacion "matching").
 
@@ -37,20 +39,25 @@ Version 0.1.0, Python 3.13 o superior, licencia MIT.
 | Dependencias de ejecucion | `requests`, `PyYAML` |
 | Particion (`split`) | extra `particion`: `splat64[mips]` |
 | Comparacion (`diff`, `probar`, `permutar`) | extra `comparacion`: `rapidfuzz`, `Levenshtein`, `cxxfilt`, `colorama`, `watchdog` |
-| Desarrollo | extra `desarrollo`: `pytest`, `pytest-cov`, `mypy`, `ruff` |
+| Desarrollo | extra `dev`: `pytest`, `pytest-cov`, `mypy`, `ruff` y los stubs de tipos |
 
 ## Instalacion
 
 Desde el repositorio publicado, fijando una version:
 
 ```
+python -m pip install git+https://github.com/Ordi94/psx-decomp-kit@v0.1.0
 python -m pip install "psx-decomp-kit[particion,comparacion] @ git+https://github.com/Ordi94/psx-decomp-kit@v0.1.0"
 ```
 
-En modo editable, desde una copia local del kit (por ejemplo `kit/` dentro de un proyecto):
+La segunda orden agrega los extras de particion y comparacion.
+
+Para desarrollar el kit, en modo editable desde un clon, con el extra `dev`:
 
 ```
-python -m pip install -e "./kit[particion,comparacion,desarrollo]"
+git clone https://github.com/Ordi94/psx-decomp-kit
+cd psx-decomp-kit
+python -m pip install -e ".[particion,comparacion,dev]"
 ```
 
 Para fijar el kit en el `requirements.txt` de un proyecto:
@@ -144,6 +151,66 @@ Deben cumplir `juego_desde < librerias_desde < librerias_hasta`, dentro de la RA
 `subcomandos`, `antes_de_construir`, `despues_de_verificar` (listas) y `entrada_progreso` (una referencia),
 todas como `paquete.modulo:funcion`; el contrato esta en "Plugins y ganchos".
 
+### Ejemplo completo
+
+Manifiesto con todas las secciones y claves, con sus valores por defecto salvo los datos propios del
+proyecto (se valida con `python -m psxdecomp.cli comprobar`):
+
+```toml
+[proyecto]
+nombre = "mi-juego"
+ejecutable = "EJEC_001.00"
+referencia = "config/ejecutable.json"
+prefijo_entorno = "MIJUEGO"
+comando = "python tools/build.py"
+funcion_ejemplo = "funcion_ejemplo"
+
+[rutas]
+fuentes = "src"
+incluir = "include"
+asm = "asm"
+macros = "asm/include"
+asm_coincidente = "asm/matchings"
+asm_pendiente = "asm/nonmatchings"
+build = "build"
+expected = "expected"
+splat = "config/splat.yaml"
+simbolos = ["config/symbols.txt"]
+simbolos_adicionales = "config/simbolos_adicionales.txt"
+opciones_compilacion = "config/opciones_compilacion.toml"
+toolchain_lock = "config/toolchain.lock.json"
+local = "config/local.toml"
+documento_progreso = "docs/PROGRESO.md"
+readme = "README.md"
+subcarpetas_ajenas = ["overlay"]
+asm_auxiliares = ["libs"]
+
+[zonas]
+juego_desde = 0x80100000
+librerias_desde = 0x80300000
+librerias_hasta = 0x80400000
+
+[convenciones]
+macro_no_coincidente = "NON_MATCHING"
+macro_ensamblador = "INCLUDE_ASM"
+pendiente = '\APendiente:\s*puntuacion\s+(\d+)\b'
+sufijo_subsistema = '_\d+$'
+manuscrita = '\brutina(?:\s+de\s+\w+)?\s+escrita\s+a\s+mano\s+en\s+el\s+original\b'
+patron_simbolo_datos = '^D_([0-9A-F]{8})$'
+patron_linea_simbolo = '^([A-Za-z_]\w*)\s*=\s*0x([0-9A-Fa-f]{1,8})\s*;\s*//(.*)$'
+max_valor_g = 64
+
+[compilacion]
+version_aspsx = "2.80"
+opciones_compilador = ["-quiet", "-O2"]
+
+[plugins]
+subcomandos = ["tools.ordenes:registrar"]
+antes_de_construir = ["tools.ganchos:antes_de_construir"]
+despues_de_verificar = ["tools.ganchos:despues_de_verificar"]
+entrada_progreso = "tools.subsistemas:agrupar"
+```
+
 ### Variables de entorno
 
 Las rutas se resuelven con la regla: argumento, `PSXDECOMP_X`, `<alias>_X`, archivo local, valor por
@@ -180,15 +247,24 @@ if __name__ == "__main__":
 Lo propio del proyecto (formatos del juego, herramientas de analisis) vive en sus paquetes y se engancha por
 `[plugins]` o importando `psxdecomp`; el kit nunca importa codigo del proyecto.
 
-## Pruebas
+## Desarrollo
+
+Con el extra `dev` instalado, desde la raiz del clon:
 
 ```
 python -m pytest
+python -m ruff check .
+python -m ruff format --check .
+python -m mypy
 ```
 
-Ejecutado desde `kit/` (con el extra `desarrollo`), exige cobertura del 100 % de lineas y ramas del paquete.
-`mypy` en modo estricto y `ruff` deben pasar sin avisos. Las pruebas de coherencia del consumidor se omiten, con
-el motivo visible, cuando el kit no esta dentro de un proyecto con `psxdecomp.toml`.
+`pytest` exige cobertura del 100 % de lineas y ramas del paquete (`fail_under = 100`): por debajo, la corrida
+falla. `mypy` corre en modo estricto y `ruff` debe pasar sin avisos. Las pruebas no necesitan Wine ni el SDK
+(todo lo externo esta simulado); las que dependen de enlaces simbolicos se omiten, con el motivo visible, donde
+el sistema no los permite. Las pruebas de coherencia del consumidor tambien se omiten cuando el kit no esta
+dentro de un proyecto con `psxdecomp.toml`. La integracion continua (`.github/workflows/ci.yml`) repite esta
+cadena en Linux y Windows con Python 3.13. Normas de contribucion en `CONTRIBUTING.md`; reporte de
+vulnerabilidades en `SECURITY.md`.
 
 ## Capas del cargador
 
@@ -273,7 +349,7 @@ un subcomando repetido o sin `manejador` dan un `PluginInvalidoError` que nombra
 `tests/test_coherencia_consumidor.py` comprueba lo que el manifiesto del proyecto consumidor declara sobre
 otros archivos suyos: que las referencias de los plugins se resuelvan, que el nombre del ejecutable coincida
 con el de su archivo de referencia y que las zonas de memoria caigan dentro del segmento que esa referencia
-describe. Se ejecuta contra el proyecto que contiene al kit (la carpeta superior a `kit/` con un
+describe. Se ejecuta contra el proyecto que contiene al kit (la carpeta superior a la del kit, si tiene un
 `psxdecomp.toml`); si el kit se usa fuera de un proyecto consumidor, esas pruebas se omiten y el resumen de
 `pytest` (`-rs`) lista el motivo. Un proyecto no debe repetir en su codigo lo que el manifiesto ya declara: lo
 lee de el.

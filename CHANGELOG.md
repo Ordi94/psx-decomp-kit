@@ -24,11 +24,13 @@ Primera version publicable del kit.
   adaptacion a Windows o Linux (Wine y binutils nativos).
 - Variables de entorno con prefijo propio (`PSXDECOMP_`) y alias configurable por proyecto.
 - Paquete tipado (`py.typed`), cobertura del 100 % de lineas y ramas, `mypy` estricto y `ruff` sin avisos.
+- Integracion continua en GitHub Actions (Linux y Windows, Python 3.13): `ruff`, `mypy` y `pytest` con cobertura.
+- Documentos de comunidad: `CONTRIBUTING.md` y `SECURITY.md`.
 
 ### Dependencias
 
 `requests` y `PyYAML`; extras `particion` (`splat64`), `comparacion` (`rapidfuzz`, `Levenshtein`, `cxxfilt`,
-`colorama`, `watchdog`) y `desarrollo`.
+`colorama`, `watchdog`) y `dev`.
 
 ### No incluye
 
