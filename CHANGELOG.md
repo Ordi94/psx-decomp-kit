@@ -2,6 +2,15 @@
 
 El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y el versionado es semantico.
 
+## [0.1.1] - 2026-11-05
+
+### Corregido
+
+- La cobertura de la limpieza forzada no dependia del sistema operativo: el manejador que reintenta el borrado
+  de un archivo de solo lectura solo se ejecutaba en Windows y la integracion continua en Linux fallaba por
+  cobertura. El manejador es ahora una funcion de modulo (`_forzar_borrado`) con el mismo comportamiento, y
+  las pruebas lo ejercitan de forma identica en ambos sistemas.
+
 ## [0.1.0] - 2026-11-04
 
 Primera version publicable del kit.

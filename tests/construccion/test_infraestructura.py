@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import sys
 from pathlib import Path
@@ -474,6 +475,45 @@ def test_limpiar_elimina_archivos_de_solo_lectura_y_rutas_que_son_archivos(raiz:
     (raiz / "expected").write_bytes(b"es un archivo, no una carpeta")
     assert infra.limpiar(raiz, "PRUEBA.EXE", rutas=RUTAS) == ["asm", "expected"]
     assert not (raiz / "asm").exists()
+
+
+def test_borrar_arbol_reintenta_con_escritura_habilitada_cuando_el_borrado_falla(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """La rama del manejador se fuerza igual en Windows y Linux: rmtree se sustituye por un doble."""
+    carpeta = tmp_path / "generado"
+    carpeta.mkdir()
+    protegido = carpeta / "protegido.s"
+    protegido.write_text("x", encoding="utf-8")
+    os.chmod(protegido, stat.S_IREAD)
+    solo_lectura_antes = not protegido.stat().st_mode & stat.S_IWRITE
+    permisos_al_reintentar: list[bool] = []
+
+    def borrar_exigiendo_escritura(destino: str) -> None:
+        permisos_al_reintentar.append(bool(Path(destino).stat().st_mode & stat.S_IWRITE))
+        os.remove(destino)
+
+    def rmtree_falso(ruta: Any, onexc: Any) -> None:
+        onexc(borrar_exigiendo_escritura, str(protegido), PermissionError("solo lectura simulado"))
+        carpeta.rmdir()
+
+    monkeypatch.setattr(shutil, "rmtree", rmtree_falso)
+    assert infra._borrar_arbol(carpeta) is True
+    assert solo_lectura_antes
+    assert permisos_al_reintentar == [True]
+    assert not carpeta.exists()
+
+
+def test_forzar_borrado_propaga_el_error_si_el_reintento_tambien_falla(tmp_path: Path) -> None:
+    archivo = tmp_path / "a.s"
+    archivo.write_text("x", encoding="utf-8")
+
+    def fallar(_destino: str) -> None:
+        raise PermissionError("sigue bloqueado")
+
+    with pytest.raises(PermissionError, match="sigue bloqueado"):
+        infra._forzar_borrado(fallar, str(archivo), PermissionError("original"))
+    assert archivo.exists()
 
 
 def test_el_ejecutor_por_defecto_es_ejecutar_proceso() -> None:

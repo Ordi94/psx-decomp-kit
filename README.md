@@ -17,7 +17,7 @@ Un paquete Python, `psxdecomp`, con las piezas genericas de un proyecto de desco
 - instalacion verificada del toolchain externo (SDK, binutils, `maspsx`, `asm-differ`);
 - cargador y validador del manifiesto `psxdecomp.toml`, unica fuente de todo lo que depende del proyecto.
 
-Version 0.1.0, Python 3.13 o superior, licencia MIT.
+Version 0.1.1, Python 3.13 o superior, licencia MIT.
 
 ## Que no es
 

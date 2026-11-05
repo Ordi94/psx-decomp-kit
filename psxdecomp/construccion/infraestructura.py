@@ -384,6 +384,31 @@ def resolver_herramientas(lock: dict[str, Componente], raiz_toolchain: Path, pyt
     )
 
 
+def _forzar_borrado(funcion: Callable[[str], object], destino: str, _error: BaseException) -> None:
+    """
+    Reintenta una operacion de borrado fallida tras quitar el atributo de solo lectura.
+
+    Contexto:
+        Manejador ``onexc`` de ``shutil.rmtree`` en ``_borrar_arbol``. En Windows un archivo de solo
+        lectura no se puede borrar y rmtree invoca al manejador; en Linux el borrado depende de los
+        permisos de la carpeta contenedora y el manejador solo se invoca si esa carpeta no es escribible.
+        Esta funcion es de modulo (y no un cierre) para ejercitarla igual en ambos sistemas.
+
+    Args:
+        funcion (Callable[[str], object]): Operacion que fallo (``os.remove`` o ``os.rmdir``).
+        destino (str): Ruta sobre la que fallo.
+        _error (BaseException): Error original; se ignora porque el reintento tiene su propia excepcion.
+
+    Raises:
+        OSError: Si tras habilitar la escritura la operacion vuelve a fallar.
+
+    Ejemplo:
+        shutil.rmtree(ruta, onexc=_forzar_borrado)
+    """
+    os.chmod(destino, stat.S_IWRITE)
+    funcion(destino)
+
+
 def _borrar_arbol(ruta: Path) -> bool:
     """Elimina un archivo, enlace o carpeta (aun con atributo de solo lectura); informa si existia."""
     if ruta.is_symlink() or ruta.is_file():
@@ -391,12 +416,7 @@ def _borrar_arbol(ruta: Path) -> bool:
         return True
     if not ruta.is_dir():
         return False
-
-    def forzar(funcion: Callable[[str], object], destino: str, _error: BaseException) -> None:
-        os.chmod(destino, stat.S_IWRITE)
-        funcion(destino)
-
-    shutil.rmtree(ruta, onexc=forzar)
+    shutil.rmtree(ruta, onexc=_forzar_borrado)
     return True
 
 
