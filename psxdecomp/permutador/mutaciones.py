@@ -21,6 +21,7 @@ import random
 import re
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 from psxdecomp.permutador import analisis as an
@@ -1360,7 +1361,7 @@ def _locales_unificables(ctx: Contexto) -> list[tuple[str, str]]:
                 primera == segunda
                 or primera not in del_cuerpo
                 or decl_segunda.inicial is not None
-                or (decl_primera.base, decl_primera.estrellas) != (decl_segunda.base, decl_segunda.estrellas)
+                or not _tipos_unificables(ctx, decl_primera, decl_segunda)
             ):
                 continue
             en_primera = [i for i, nombres in enumerate(menciones) if primera in nombres]
@@ -1915,6 +1916,1297 @@ def introducir_copia_de_campo(ctx: Contexto) -> str | None:
 
 
 # ---------------------------------------------------------------------------------------------------
+# Ayudantes comunes de las mutaciones de variables, bucles y copias
+# ---------------------------------------------------------------------------------------------------
+
+NARROW_ANCHOS = ("u8", "s8", "u16", "s16")
+ALCANCE_MAXIMO_DE_DESPLAZAMIENTO = 8
+
+
+def _nombres_inseguros(ctx: Contexto) -> set[str]:
+    """Nombres que el analisis por nombre no puede seguir: ambiguos o con la direccion tomada."""
+    con_direccion = {ubicacion[2:] for ubicacion in _locales_con_direccion(ctx.funcion)}
+    return nombres_ambiguos(ctx.funcion) | con_direccion
+
+
+def _es_id(expr: c.Expr, nombre: str) -> bool:
+    """La expresion es exactamente el identificador ``nombre``."""
+    return isinstance(expr, c.Id) and expr.nombre == nombre
+
+
+def _nombres_escritos(expr: c.Expr) -> list[str]:
+    """Variables que una expresion escribe de forma directa (``x = e``, ``x++``), con repeticion."""
+    escritos: list[str] = []
+    for nodo in c.recorrer(expr):
+        if isinstance(nodo, c.Asigna) and isinstance(nodo.destino, c.Id):
+            escritos.append(nodo.destino.nombre)
+        elif (
+            isinstance(nodo, c.Postfijo) or (isinstance(nodo, c.Unario) and nodo.op in ("++", "--"))
+        ) and isinstance(nodo.operando, c.Id):
+            escritos.append(nodo.operando.nombre)
+    return escritos
+
+
+def _escrituras_en(sentencia: c.Sentencia, nombre: str) -> int:
+    """Cantidad de escrituras directas de una variable en una sentencia y en todo lo que contiene."""
+    total = 0
+    for interna in _anidadas(sentencia):
+        if isinstance(interna, c.Decl) and interna.nombre == nombre and interna.inicial is not None:
+            total += 1
+        for raiz in c.expresiones_de(interna):
+            total += _nombres_escritos(raiz).count(nombre)
+    return total
+
+
+def _escritos_en_sentencia(sentencia: c.Sentencia) -> set[str]:
+    """Variables que una sentencia escribe de forma directa, con todo lo que contiene."""
+    escritos: set[str] = set()
+    for interna in _anidadas(sentencia):
+        if isinstance(interna, c.Decl) and interna.inicial is not None:
+            escritos.add(interna.nombre)
+        for raiz in c.expresiones_de(interna):
+            escritos.update(_nombres_escritos(raiz))
+    return escritos
+
+
+def _tiene_salto_o_etiqueta(sentencia: c.Sentencia) -> bool:
+    """Una sentencia (o algo que contiene) es un ``goto``, una etiqueta o una directiva del preprocesador."""
+    return any(isinstance(s, c.Etiqueta | c.Saltar | c.Preprocesador) for s in _anidadas(sentencia))
+
+
+def _incremento_unitario(expr: c.Expr, nombre: str) -> bool:
+    """La expresion suma uno a la variable: ``x++``, ``++x`` o ``x += 1``."""
+    if isinstance(expr, c.Postfijo | c.Unario):
+        return expr.op == "++" and _es_id(expr.operando, nombre)
+    return (
+        isinstance(expr, c.Asigna)
+        and expr.op == "+="
+        and _es_id(expr.destino, nombre)
+        and an.valor_de_literal(expr.valor) == 1
+    )
+
+
+# --- copias vigentes: variables que valen lo mismo en un punto de un bloque ------------------------------
+
+
+def _raiz_de_copia(representantes: dict[str, str], nombre: str) -> str:
+    """Representante de la clase de variables que valen lo mismo que ``nombre``."""
+    return representantes.get(nombre, nombre)
+
+
+def _olvidar_copia(representantes: dict[str, str], nombre: str) -> None:
+    """Anula lo sabido de ``nombre`` y de toda variable cuya clase lo tenia de representante."""
+    representantes.pop(nombre, None)
+    for otro in [clave for clave, raiz in representantes.items() if raiz == nombre]:
+        del representantes[otro]
+
+
+def _copia_simple(sentencia: c.Sentencia) -> tuple[str, str] | None:
+    """Destino y origen si la sentencia es ``x = y;`` o ``T x = y;`` entre dos variables."""
+    if isinstance(sentencia, c.Decl):
+        valor = sentencia.inicial
+        return (sentencia.nombre, valor.nombre) if isinstance(valor, c.Id) else None
+    if (
+        isinstance(sentencia, c.Expresion)
+        and isinstance(sentencia.expr, c.Asigna)
+        and sentencia.expr.op == "="
+        and isinstance(sentencia.expr.destino, c.Id)
+        and isinstance(sentencia.expr.valor, c.Id)
+    ):
+        return sentencia.expr.destino.nombre, sentencia.expr.valor.nombre
+    return None
+
+
+def _copias_vigentes(ctx: Contexto, bloque: c.Bloque, indice: int) -> dict[str, str]:
+    """
+    Calcula que variables valen lo mismo justo antes de ``bloque.items[indice]``.
+
+    Contexto:
+        Base de las mutaciones que cambian una variable por otra equivalente en ese punto. Solo se
+        siguen copias directas ``x = y;`` entre variables locales o parametros del mismo tipo escalar,
+        sin direccion tomada ni nombre ambiguo, dentro de las sentencias anteriores del mismo bloque.
+        Cualquier escritura posterior a cualquiera de las dos variables, o una etiqueta o un salto,
+        anula lo sabido. Lo que ocurre antes del bloque no se supone: es la hipotesis mas conservadora.
+
+    Args:
+        ctx (Contexto): Contexto de la ronda.
+        bloque (c.Bloque): Bloque que contiene la sentencia.
+        indice (int): Posicion de la sentencia.
+
+    Returns:
+        dict[str, str]: Para cada variable con copia vigente, el representante de su clase; dos
+        variables valen lo mismo si tienen el mismo representante (``_raiz_de_copia``).
+
+    Ejemplo:
+        vigentes = _copias_vigentes(ctx, bloque, 3)
+    """
+    inseguros = _nombres_inseguros(ctx)
+    representantes: dict[str, str] = {}
+    for previa in bloque.items[:indice]:
+        if _tiene_salto_o_etiqueta(previa):
+            representantes.clear()
+            continue
+        for escrito in _escritos_en_sentencia(previa):
+            _olvidar_copia(representantes, escrito)
+        copia = _copia_simple(previa)
+        if copia is None:
+            continue
+        destino, origen = copia
+        tipos = (ctx.entorno.locales.get(destino), ctx.entorno.locales.get(origen))
+        if (
+            destino != origen
+            and not {destino, origen} & inseguros
+            and tipos[0] is not None
+            and tipos[0] == tipos[1]
+            and tipos[0].es_escalar
+        ):
+            representantes[destino] = _raiz_de_copia(representantes, origen)
+    return representantes
+
+
+def _valen_lo_mismo(representantes: dict[str, str], a: str, b: str) -> bool:
+    """Las dos variables tienen copia vigente de la otra (o de una misma tercera)."""
+    return a != b and _raiz_de_copia(representantes, a) == _raiz_de_copia(representantes, b)
+
+
+# ---------------------------------------------------------------------------------------------------
+# Bucle: puntero que avanza a acceso indexado
+# ---------------------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _Avance:
+    """Sentencia o paso de ``for`` que suma uno a una variable en cada vuelta de un bucle.
+
+    Attributes:
+        posicion: Posicion en el cuerpo, o la cantidad de sentencias del cuerpo si es el paso de un ``for``.
+        sentencia: Sentencia del cuerpo que lo contiene, o ``None`` si es parte del paso de un ``for``.
+    """
+
+    posicion: int
+    sentencia: c.Sentencia | None
+
+
+def _avances_unitarios(bucle: c.Mientras | c.HacerMientras | c.Para, nombre: str) -> list[_Avance]:
+    """Avances de uno de una variable: sentencias del cuerpo o el paso del ``for`` (entero o con coma)."""
+    avances = [
+        _Avance(posicion, sentencia)
+        for posicion, sentencia in enumerate(bucle.cuerpo.items)
+        if isinstance(sentencia, c.Expresion) and not sentencia.comentarios
+        if _incremento_unitario(sentencia.expr, nombre)
+    ]
+    paso = bucle.paso if isinstance(bucle, c.Para) else None
+    if paso is not None:
+        partes = [paso.izq, paso.der] if isinstance(paso, c.Binario) and paso.op == "," else [paso]
+        avances.extend(
+            _Avance(len(bucle.cuerpo.items), None) for p in partes if _incremento_unitario(p, nombre)
+        )
+    return avances
+
+
+def _quitar_avance(bucle: c.Mientras | c.HacerMientras | c.Para, avance: _Avance, nombre: str) -> None:
+    """Elimina un avance de uno de la sentencia o del paso del bucle."""
+    if avance.sentencia is not None:
+        bucle.cuerpo.items.remove(avance.sentencia)
+        return
+    # ``_avances_unitarios`` solo da un avance sin sentencia cuando es parte del paso de un ``for``.
+    assert isinstance(bucle, c.Para) and bucle.paso is not None  # noqa: S101
+    paso = bucle.paso
+    if isinstance(paso, c.Binario) and paso.op == ",":
+        bucle.paso = paso.der if _incremento_unitario(paso.izq, nombre) else paso.izq
+    else:
+        bucle.paso = None
+
+
+def _reemplazo_por_indice(nodo: c.Expr, puntero: str, base: c.Expr, contador: str) -> c.Expr | None:
+    """Acceso indexado equivalente a ``*p``, ``p->c`` o ``p[k]`` cuando ``p`` vale ``base + contador``."""
+    elemento = c.Indice(copy.deepcopy(base), c.Id(contador))
+    if isinstance(nodo, c.Unario) and nodo.op == "*" and _es_id(nodo.operando, puntero):
+        return elemento
+    if isinstance(nodo, c.Miembro) and nodo.flecha and _es_id(nodo.base, puntero):
+        return c.Miembro(elemento, False, nodo.campo)
+    if (
+        isinstance(nodo, c.Indice)
+        and _es_id(nodo.base, puntero)
+        and an.es_pura(nodo.indice)
+        and puntero not in an.identificadores_de(nodo.indice)
+    ):
+        desplazamiento = an.valor_de_literal(nodo.indice)
+        if desplazamiento == 0:
+            return elemento
+        return c.Indice(copy.deepcopy(base), c.Binario("+", c.Id(contador), nodo.indice))
+    return None
+
+
+def _inicio_de_puntero(sentencia: c.Sentencia) -> tuple[str, str, str] | None:
+    """Puntero, base y contador si la sentencia es ``p = base + i;`` o ``p = &base[i];``."""
+    if not (
+        isinstance(sentencia, c.Expresion)
+        and not sentencia.comentarios
+        and isinstance(sentencia.expr, c.Asigna)
+        and sentencia.expr.op == "="
+        and isinstance(sentencia.expr.destino, c.Id)
+    ):
+        return None
+    valor = sentencia.expr.valor
+    if isinstance(valor, c.Unario) and valor.op == "&":
+        valor = (
+            c.Binario("+", valor.operando.base, valor.operando.indice)
+            if isinstance(valor.operando, c.Indice)
+            else valor
+        )
+    if (
+        isinstance(valor, c.Binario)
+        and valor.op == "+"
+        and isinstance(valor.izq, c.Id)
+        and isinstance(valor.der, c.Id)
+    ):
+        return sentencia.expr.destino.nombre, valor.izq.nombre, valor.der.nombre
+    return None
+
+
+def _elemento_coincide(puntero: an.Tipo, base: an.Tipo) -> bool:
+    """El tipo del puntero es el de la direccion de un elemento de ``base`` (arreglo o puntero)."""
+    if base.arreglo:
+        return puntero.base == base.base and puntero.estrellas == base.estrellas + 1
+    return base.es_puntero and puntero.texto == base.texto
+
+
+@dataclass(frozen=True)
+class _PunteroIndexable:
+    """Un bucle cuyo puntero de recorrido se puede sustituir por ``base[contador]``.
+
+    Attributes:
+        bloque: Bloque que contiene la inicializacion y el bucle.
+        inicio: Sentencia ``p = base + i;`` que precede al bucle.
+        bucle: El bucle.
+        puntero: Nombre del puntero.
+        contador: Nombre del contador que avanza a la par.
+        base: Base del recorrido.
+        usos: Pares (sitio, acceso indexado) que sustituyen cada uso del puntero.
+        avance: Avance de uno del puntero.
+    """
+
+    bloque: c.Bloque
+    inicio: c.Sentencia
+    bucle: c.Mientras | c.HacerMientras | c.Para
+    puntero: str
+    contador: str
+    base: c.Expr
+    usos: tuple[tuple[Sitio, c.Expr], ...]
+    avance: _Avance
+
+
+def _usos_indexables(
+    bucle: c.Mientras | c.HacerMientras | c.Para, puntero: str, base: c.Expr, contador: str
+) -> tuple[list[tuple[Sitio, c.Expr, int | None]], int] | None:
+    """
+    Reune los accesos al puntero dentro del bucle y la cantidad de apariciones del identificador.
+
+    Cada acceso se da con la posicion de la sentencia del cuerpo que lo contiene (``None`` si esta en la
+    condicion). Devuelve ``None`` si el puntero aparece en la inicializacion o en el paso del ``for``.
+    """
+    posicion_de = {id(interna): j for j, s in enumerate(bucle.cuerpo.items) for interna in _anidadas(s)}
+    accesos: list[tuple[Sitio, c.Expr, int | None]] = []
+    apariciones = 0
+    for interna in _anidadas(bucle):
+        for raiz in c.expresiones_de(interna):
+            for sitio in sitios_de(raiz, interna):
+                apariciones += int(_es_id(sitio.nodo, puntero))
+                reemplazo = _reemplazo_por_indice(sitio.nodo, puntero, base, contador)
+                if reemplazo is None:
+                    continue
+                if interna is bucle:
+                    if raiz is not bucle.cond:
+                        return None
+                    accesos.append((sitio, reemplazo, None))
+                else:
+                    accesos.append((sitio, reemplazo, posicion_de[id(interna)]))
+    return accesos, apariciones
+
+
+def _punteros_indexables(ctx: Contexto) -> list[_PunteroIndexable]:
+    """
+    Bucles cuyo puntero de recorrido ``p = base + i`` avanza uno por vuelta a la par que el contador ``i``.
+
+    El puntero es una local simple sin inicializador cuyas apariciones son la inicializacion que precede
+    al bucle, un unico avance de uno y accesos ``*p``, ``p->c`` o ``p[k]`` fuera del tramo que queda
+    entre el avance del puntero y el del contador. La base y el contador son locales o parametros que el
+    bucle no escribe (el contador solo en su avance) y el bucle no tiene ``continue``.
+    """
+    declaraciones = _declaraciones_simples(ctx)
+    inseguros = _nombres_inseguros(ctx)
+    encontrados: list[_PunteroIndexable] = []
+    for bloque, indice, bucle in _sentencias(ctx.funcion):
+        if indice == 0 or not isinstance(bucle, c.Mientras | c.HacerMientras | c.Para):
+            continue
+        datos = _inicio_de_puntero(bloque.items[indice - 1])
+        if datos is None or _contiene_continuar(bucle.cuerpo):
+            continue
+        puntero, nombre_base, contador = datos
+        base = c.Id(nombre_base)
+        declaracion = declaraciones.get(puntero)
+        tipo_base = ctx.entorno.locales.get(nombre_base)
+        tipo_contador = ctx.entorno.locales.get(contador)
+        if (
+            declaracion is None
+            or declaracion[1].inicial is not None
+            or len({puntero, nombre_base, contador}) != 3
+            or tipo_base is None
+            or {nombre_base, contador} & inseguros
+            or not _elemento_coincide(
+                an.parsear_tipo(declaracion[1].base, declaracion[1].estrellas), tipo_base
+            )
+            or tipo_contador is None
+            or not tipo_contador.es_entero
+        ):
+            continue
+        avances_p, avances_i = _avances_unitarios(bucle, puntero), _avances_unitarios(bucle, contador)
+        usos = _usos_indexables(bucle, puntero, base, contador)
+        if (
+            usos is None
+            or len(avances_p) != 1
+            or len(avances_i) != 1
+            or _escrituras_en(bucle, puntero) != 1
+            or _escrituras_en(bucle, contador) != 1
+            or _escrituras_en(bucle, nombre_base) != 0
+            or usos[1] != len(usos[0]) + 1
+            or len(_usos_de(ctx.funcion, puntero)) != usos[1] + 1
+        ):
+            continue
+        desde, hasta = sorted((avances_p[0].posicion, avances_i[0].posicion))
+        if any(posicion is not None and desde < posicion < hasta for _, _, posicion in usos[0]):
+            continue
+        encontrados.append(
+            _PunteroIndexable(
+                bloque,
+                bloque.items[indice - 1],
+                bucle,
+                puntero,
+                contador,
+                base,
+                tuple((sitio, reemplazo) for sitio, reemplazo, _ in usos[0]),
+                avances_p[0],
+            )
+        )
+    return encontrados
+
+
+def bucle_por_indice(ctx: Contexto) -> str | None:
+    """
+    Sustituye el puntero que recorre un bucle por el acceso indexado ``base[i]`` en todas sus sentencias.
+
+    Contexto:
+        ``p = base + i; while (...) { ... *p ... p++; i++; }`` mantiene dos variables de induccion; con
+        ``base[i]`` el compilador conserva solo el contador y calcula la direccion en cada acceso, lo
+        que cambia el reparto de registros y la forma del bucle. ``indice_o_puntero`` solo convierte un
+        acceso suelto; aqui se reescriben todos los accesos del bucle a la vez, porque convertir solo
+        una parte dejaria vivos el puntero y el contador. Solo se aplica si el puntero vale siempre
+        ``base + i`` en los puntos donde se usa (avanza una unidad por vuelta a la par que ``i``), si no
+        se usa tras el bucle y si ni la base ni el contador se escriben en el bucle salvo el avance.
+
+    Args:
+        ctx (Contexto): Contexto de la ronda.
+
+    Returns:
+        str | None: Descripcion, o ``None`` si ningun bucle cumple las condiciones.
+
+    Ejemplo:
+        descripcion = bucle_por_indice(contexto)
+    """
+    candidato = _elegir(ctx.azar, _punteros_indexables(ctx))
+    if candidato is None:
+        return None
+    for sitio, reemplazo in candidato.usos:
+        c.reemplazar_hijo(sitio.padre, sitio.nodo, reemplazo)
+    _quitar_avance(candidato.bucle, candidato.avance, candidato.puntero)
+    candidato.bloque.items.remove(candidato.inicio)
+    _quitar_declaracion(ctx.funcion, candidato.puntero)
+    ctx.entorno.locales.pop(candidato.puntero, None)
+    return f"bucle_por_indice({candidato.puntero} por {an.texto_de(candidato.base)}[{candidato.contador}])"
+
+
+# ---------------------------------------------------------------------------------------------------
+# Locales: segunda local para una segunda lectura de un global y anchos por destino
+# ---------------------------------------------------------------------------------------------------
+
+
+def _global_asignado(ctx: Contexto, sentencia: c.Sentencia, nombre: str) -> str | None:
+    """Nombre del global ``g`` si la sentencia es ``nombre = g;`` con ``g`` ajeno a las variables locales."""
+    if (
+        isinstance(sentencia, c.Expresion)
+        and isinstance(sentencia.expr, c.Asigna)
+        and sentencia.expr.op == "="
+        and _es_id(sentencia.expr.destino, nombre)
+        and isinstance(sentencia.expr.valor, c.Id)
+        and sentencia.expr.valor.nombre not in ctx.entorno.locales
+    ):
+        return sentencia.expr.valor.nombre
+    return None
+
+
+def _locales_duplicables(ctx: Contexto) -> list[tuple[str, int, str]]:
+    """
+    Locales que se asignan dos veces desde el mismo global en tramos del cuerpo de vidas disjuntas.
+
+    Devuelve (local, posicion de la segunda asignacion, global). La primera sentencia del cuerpo que
+    menciona la local y la segunda asignacion son ``x = g;`` con el mismo ``g``; desde la segunda en
+    adelante se usa la copia. Una funcion con ``goto`` o etiquetas no se toca.
+    """
+    if any(isinstance(s, c.Etiqueta | c.Saltar) for _, _, s in _sentencias(ctx.funcion)):
+        return []
+    cuerpo = ctx.funcion.cuerpo
+    menciones = [_nombres_en(s) for s in cuerpo.items]
+    candidatos: list[tuple[str, int, str]] = []
+    for nombre, (_, declaracion) in _declaraciones_simples(ctx).items():
+        indices = [i for i, nombres in enumerate(menciones) if nombre in nombres]
+        if declaracion.inicial is not None or len(indices) < 2:
+            continue
+        primero = _global_asignado(ctx, cuerpo.items[indices[0]], nombre)
+        candidatos.extend(
+            (nombre, i, primero)
+            for i in indices[1:]
+            if primero is not None and _global_asignado(ctx, cuerpo.items[i], nombre) == primero
+        )
+    return candidatos
+
+
+def duplicar_local_de_global(ctx: Contexto) -> str | None:
+    """
+    Da una segunda local a la segunda lectura del mismo global en un tramo posterior del cuerpo.
+
+    Contexto:
+        Cuando una local recibe el mismo global en dos tramos de vidas disjuntas, el compilador la
+        mantiene en un unico registro; con dos locales cada lectura vive aparte y el reparto cambia.
+        Es la operacion inversa de ``unificar_locales`` para el caso de una lectura de global y se
+        parece a ``partir_local``, que reparte por ramas de un ``if``. Se aplica a una local simple sin
+        inicializador cuya primera sentencia y otra posterior del cuerpo son ``x = g;`` con el mismo
+        ``g`` ajeno a las variables locales; desde la segunda sentencia hasta el final del cuerpo la
+        local pasa a ser una nueva del mismo tipo.
+
+    Args:
+        ctx (Contexto): Contexto de la ronda.
+
+    Returns:
+        str | None: Descripcion, o ``None`` si ninguna local se asigna dos veces desde el mismo global.
+
+    Ejemplo:
+        descripcion = duplicar_local_de_global(contexto)
+    """
+    elegido = _elegir(ctx.azar, _locales_duplicables(ctx))
+    if elegido is None:
+        return None
+    nombre, posicion, global_leido = elegido
+    modelo = _declaraciones_simples(ctx)[nombre][1]
+    nuevo = _nombre_temporal(ctx)
+    _renombrar_en(ctx.funcion.cuerpo.items[posicion:], nombre, nuevo)
+    _declarar_como(ctx, nuevo, modelo)
+    return f"duplicar_local_de_global({nombre} en {nuevo} = {global_leido})"
+
+
+def _destino_estrecho(ctx: Contexto, sitio: Sitio) -> bool:
+    """El sitio es el valor de ``destino = x;`` y el destino es un entero de 16 bits o menos."""
+    padre = sitio.padre
+    if not (isinstance(padre, c.Asigna) and padre.op == "=" and padre.valor is sitio.nodo):
+        return False
+    destino = ctx.entorno.inferir(padre.destino)
+    return destino is not None and destino.es_entero and destino.ancho <= 16
+
+
+def _escrituras_simples(sitios: list[tuple[c.Sentencia, Sitio]]) -> list[c.Expr] | None:
+    """Valores asignados con ``=`` a la variable de los sitios, o ``None`` si alguna escritura no es ``=``."""
+    valores: list[c.Expr] = []
+    for _, sitio in sitios:
+        if not sitio.lvalue:
+            continue
+        padre = sitio.padre
+        if not (isinstance(padre, c.Asigna) and padre.op == "=" and padre.destino is sitio.nodo):
+            return None
+        valores.append(padre.valor)
+    return valores
+
+
+def _anchos_por_destino(ctx: Contexto) -> list[tuple[c.Decl, an.Tipo]]:
+    """Locales de 16 o 32 bits que solo se copian a destinos de 16 bits o menos, con cada ancho nuevo."""
+    candidatos: list[tuple[c.Decl, an.Tipo]] = []
+    for nombre, (_, declaracion) in _declaraciones_simples(ctx).items():
+        actual = an.parsear_tipo(declaracion.base, declaracion.estrellas)
+        if not actual.es_entero or actual.ancho < 16 or actual.texto not in an.TIPOS_ENTEROS_PERMITIDOS:
+            continue
+        usos = _usos_de(ctx.funcion, nombre)
+        escrituras = _escrituras_simples(usos)
+        lecturas = [sitio for _, sitio in usos if not sitio.lvalue]
+        if (
+            escrituras is None
+            or not (escrituras or declaracion.inicial is not None)
+            or not lecturas
+            or not all(_destino_estrecho(ctx, sitio) for sitio in lecturas)
+        ):
+            continue
+        candidatos.extend(
+            (declaracion, an.tipo_entero(texto)) for texto in ("s32", "s16", "u16") if texto != actual.texto
+        )
+    return candidatos
+
+
+def ancho_de_local_de_campo(ctx: Contexto) -> str | None:
+    """
+    Cambia el tipo de una local que solo copia un valor a destinos de 16 bits o menos.
+
+    Contexto:
+        Una local que recibe un campo de 16 bits y se guarda en otros campos sin operar con ella puede
+        declararse con el ancho del campo (``s16``/``u16``) o con 32 bits: el compilador inserta o evita
+        extensiones segun el ancho y reparte los registros de otro modo. ``ancho_de_temporal`` exige que
+        el valor se conserve en el tipo nuevo; aqui basta con que los 16 bits bajos se conserven, porque
+        todas las lecturas son ``destino = x;`` con un destino de 16 bits o menos, que solo guarda esos
+        bits, y las escrituras de la local son asignaciones simples. No se aplica a una local con otra
+        lectura (comparacion, operacion, argumento), con direccion tomada, parametro o nombre ambiguo.
+
+    Args:
+        ctx (Contexto): Contexto de la ronda.
+
+    Returns:
+        str | None: Descripcion, o ``None`` si ninguna local cumple las condiciones.
+
+    Ejemplo:
+        descripcion = ancho_de_local_de_campo(contexto)
+    """
+    elegido = _elegir(ctx.azar, _anchos_por_destino(ctx))
+    if elegido is None:
+        return None
+    declaracion, nuevo = elegido
+    anterior = declaracion.base
+    declaracion.base = nuevo.base
+    ctx.entorno.locales[declaracion.nombre] = nuevo
+    return f"ancho_de_local_de_campo({declaracion.nombre}: {anterior} a {nuevo.texto})"
+
+
+# ---------------------------------------------------------------------------------------------------
+# Locales: truncamiento dentro de la asignacion
+# ---------------------------------------------------------------------------------------------------
+
+
+def _valores_asignados(ctx: Contexto, declaracion: c.Decl) -> list[tuple[c.Expr, object, str]] | None:
+    """
+    Cada valor que recibe una local con el nodo que lo contiene y el atributo donde esta.
+
+    Devuelve ``None`` si la local se escribe de otra forma que con ``=`` o su inicializador.
+    """
+    valores: list[tuple[c.Expr, object, str]] = []
+    if declaracion.inicial is not None:
+        valores.append((declaracion.inicial, declaracion, "inicial"))
+    for _, sitio in _usos_de(ctx.funcion, declaracion.nombre):
+        if not sitio.lvalue:
+            continue
+        padre = sitio.padre
+        if not (isinstance(padre, c.Asigna) and padre.op == "=" and padre.destino is sitio.nodo):
+            return None
+        valores.append((padre.valor, padre, "valor"))
+    return valores
+
+
+def _truncamientos(ctx: Contexto) -> list[tuple[c.Decl, str, list[tuple[c.Expr, object, str]]]]:
+    """Locales que pasan de un tipo estrecho a ``s32`` con molde, o de ``s32`` con molde al estrecho."""
+    candidatos: list[tuple[c.Decl, str, list[tuple[c.Expr, object, str]]]] = []
+    for _, (_, declaracion) in _declaraciones_simples(ctx).items():
+        if declaracion.estrellas or declaracion.base not in (*NARROW_ANCHOS, "s32"):
+            continue
+        valores = _valores_asignados(ctx, declaracion)
+        if not valores:
+            continue
+        if declaracion.base in NARROW_ANCHOS:
+            candidatos.append((declaracion, "ensanchar", valores))
+            continue
+        moldes = {v.tipo for v, _, _ in valores if isinstance(v, c.Conversion)}
+        if (
+            len(moldes) == 1
+            and next(iter(moldes)) in NARROW_ANCHOS
+            and all(isinstance(v, c.Conversion) for v, _, _ in valores)
+        ):
+            candidatos.append((declaracion, "estrechar", valores))
+    return candidatos
+
+
+def truncar_en_asignacion(ctx: Contexto) -> str | None:
+    """
+    Pasa una local estrecha a 32 bits con un molde en cada asignacion, o la operacion inversa.
+
+    Contexto:
+        ``u16 d; d = v / 100;`` y ``s32 d; d = (u16)(v / 100);`` guardan el mismo valor en la variable,
+        pero el compilador resuelve el truncamiento en sitios distintos: en la asignacion o al
+        declarar el ancho de la variable. Las lecturas ven el mismo valor (el molde deja el resultado
+        dentro del rango del tipo estrecho y las promociones de C hacen el resto), asi que solo se
+        aplica a una local cuyas escrituras son todas asignaciones simples o su inicializador. La
+        inversa solo se aplica si todos los valores asignados llevan el mismo molde estrecho.
+
+    Args:
+        ctx (Contexto): Contexto de la ronda.
+
+    Returns:
+        str | None: Descripcion, o ``None`` si ninguna local cumple las condiciones.
+
+    Ejemplo:
+        descripcion = truncar_en_asignacion(contexto)
+    """
+    elegido = _elegir(ctx.azar, _truncamientos(ctx))
+    if elegido is None:
+        return None
+    declaracion, sentido, valores = elegido
+    estrecho = declaracion.base
+    for valor, contenedor, atributo in valores:
+        if sentido == "ensanchar":
+            if not (isinstance(valor, c.Conversion) and valor.tipo == estrecho):
+                setattr(contenedor, atributo, c.Conversion(estrecho, valor))
+        else:
+            assert isinstance(valor, c.Conversion)  # noqa: S101 - ``_truncamientos`` lo garantiza
+            setattr(contenedor, atributo, valor.operando)
+            estrecho = valor.tipo
+    nuevo = an.tipo_entero("s32") if sentido == "ensanchar" else an.parsear_tipo(estrecho)
+    anterior = declaracion.base
+    declaracion.base = nuevo.base
+    ctx.entorno.locales[declaracion.nombre] = nuevo
+    return f"truncar_en_asignacion({declaracion.nombre}: {anterior} a {nuevo.texto})"
+
+
+# ---------------------------------------------------------------------------------------------------
+# Copias vigentes: asignacion compuesta encadenada y alias en comparaciones
+# ---------------------------------------------------------------------------------------------------
+
+
+def _operando_de_encadenado(valor: c.Expr, nombre: str) -> tuple[str, c.Expr] | None:
+    """Operador y operando si ``valor`` es ``nombre op e`` (o ``e op nombre`` con operador conmutativo)."""
+    if not (isinstance(valor, c.Binario) and valor.op in OPERADORES_COMPUESTOS and an.es_pura(valor)):
+        return None
+    if _es_id(valor.izq, nombre):
+        return valor.op, valor.der
+    if valor.op in OPERADORES_COMPUESTOS_CONMUTATIVOS and _es_id(valor.der, nombre):
+        return valor.op, valor.izq
+    return None
+
+
+def _encadenables(ctx: Contexto) -> list[tuple[c.Asigna, str, c.Expr]]:
+    """
+    Asignaciones ``res = reg op e`` donde ``res`` y ``reg`` valen lo mismo, con su operador y operando.
+
+    Se reconocen en cualquier bloque, con las copias vigentes del propio bloque; ``res`` y ``reg`` son
+    variables distintas y seguras (locales o parametros del mismo tipo escalar) y ``e`` es puro y no las
+    menciona.
+    """
+    inseguros = _nombres_inseguros(ctx)
+    encontradas: list[tuple[c.Asigna, str, c.Expr]] = []
+    for bloque, indice, sentencia in _sentencias(ctx.funcion):
+        if not (
+            isinstance(sentencia, c.Expresion)
+            and isinstance(sentencia.expr, c.Asigna)
+            and sentencia.expr.op == "="
+            and isinstance(sentencia.expr.destino, c.Id)
+            and isinstance(sentencia.expr.valor, c.Binario)
+        ):
+            continue
+        asignacion, destino = sentencia.expr, sentencia.expr.destino.nombre
+        if destino in inseguros or destino not in ctx.entorno.locales:
+            continue
+        vigentes = _copias_vigentes(ctx, bloque, indice)
+        for equivalente in sorted({*vigentes, *vigentes.values()} - {destino}):
+            partes = _operando_de_encadenado(asignacion.valor, equivalente)
+            if (
+                partes is not None
+                and _valen_lo_mismo(vigentes, destino, equivalente)
+                and not {destino, equivalente} & an.identificadores_de(partes[1])
+            ):
+                encontradas.append((asignacion, partes[0], partes[1]))
+    return encontradas
+
+
+def encadenar_compuesta(ctx: Contexto) -> str | None:
+    """
+    Pasa ``res = reg op e`` a ``res op= e`` cuando ``res`` y ``reg`` valen lo mismo en ese punto.
+
+    Contexto:
+        Tras ``res = reg;`` las dos variables son copias una de otra, de modo que ``res = reg + 1`` y
+        ``res += 1`` calculan lo mismo, pero el compilador solo reutiliza el registro de ``res`` en la
+        segunda. ``asignacion_compuesta`` solo reconoce ``x = x op e``; aqui cambia la fuente del operando
+        izquierdo, y deja intactas las sentencias que luego releen la copia (``reg = res;``). La
+        equivalencia se sigue con ``_copias_vigentes``: copias directas del mismo bloque sin escritura
+        posterior de ninguna de las dos, entre variables seguras del mismo tipo escalar, y el operando
+        puro y sin ellas.
+
+    Args:
+        ctx (Contexto): Contexto de la ronda.
+
+    Returns:
+        str | None: Descripcion, o ``None`` si ninguna asignacion cumple las condiciones.
+
+    Ejemplo:
+        descripcion = encadenar_compuesta(contexto)
+    """
+    elegido = _elegir(ctx.azar, _encadenables(ctx))
+    if elegido is None:
+        return None
+    asignacion, operador, operando = elegido
+    antes = an.texto_de(asignacion)
+    asignacion.op = f"{operador}="
+    asignacion.valor = operando
+    return f"encadenar_compuesta({antes})"
+
+
+def _alias_en_igualdades(ctx: Contexto) -> list[tuple[c.Id, str]]:
+    """Operandos identificador de una igualdad con las variables que valen lo mismo en ese punto."""
+    encontrados: list[tuple[c.Id, str]] = []
+    for bloque, indice, sentencia in _sentencias(ctx.funcion):
+        if not isinstance(sentencia, c.Expresion | c.Si | c.Devolver):
+            continue
+        vigentes = _copias_vigentes(ctx, bloque, indice)
+        if not vigentes:
+            continue
+        for raiz in c.expresiones_de(sentencia):
+            escritos = set(_nombres_escritos(raiz))
+            for sitio in sitios_de(raiz, sentencia):
+                nodo = sitio.nodo
+                if not (isinstance(nodo, c.Binario) and nodo.op in ("==", "!=")):
+                    continue
+                for operando, otro in ((nodo.izq, nodo.der), (nodo.der, nodo.izq)):
+                    if not isinstance(operando, c.Id) or operando.nombre in escritos:
+                        continue
+                    encontrados.extend(
+                        (operando, alias)
+                        for alias in sorted({*vigentes, *vigentes.values()} - escritos - {operando.nombre})
+                        if _valen_lo_mismo(vigentes, operando.nombre, alias) and not _es_id(otro, alias)
+                    )
+    return encontrados
+
+
+def sustituir_por_alias(ctx: Contexto) -> str | None:
+    """
+    Sustituye un operando de una igualdad por otra variable que vale lo mismo en ese punto.
+
+    Contexto:
+        ``p == c->x`` y ``c == c->x`` son la misma comparacion si ``c = p;`` ocurrio antes sin que
+        ninguna se reasignara; el compilador, sin embargo, asigna registros distintos segun que variable
+        se compare. ``operandos_conmutados`` solo intercambia lados. La mutacion solo actua en una
+        sentencia de expresion, ``return`` o ``if`` (la condicion de un bucle se reevalua tras el
+        cuerpo), con la equivalencia que da ``_copias_vigentes``, y no cuando la propia expresion
+        escribe alguna de las dos variables. Como la sustitucion no anade lecturas de memoria, no hace
+        falta comprobar escrituras intermedias a un campo.
+
+    Args:
+        ctx (Contexto): Contexto de la ronda.
+
+    Returns:
+        str | None: Descripcion, o ``None`` si no hay una igualdad con un operando sustituible.
+
+    Ejemplo:
+        descripcion = sustituir_por_alias(contexto)
+    """
+    elegido = _elegir(ctx.azar, _alias_en_igualdades(ctx))
+    if elegido is None:
+        return None
+    operando, alias = elegido
+    antes = operando.nombre
+    operando.nombre = alias
+    return f"sustituir_por_alias({antes} por {alias})"
+
+
+# ---------------------------------------------------------------------------------------------------
+# Coma: orden de los operandos
+# ---------------------------------------------------------------------------------------------------
+
+
+def _comas_independientes(ctx: Contexto) -> list[c.Binario]:
+    """Comas de una sentencia de expresion o del inicio y paso de un ``for`` cuyos lados conmutan."""
+    con_direccion = _locales_con_direccion(ctx.funcion)
+    raices: list[c.Expr] = []
+    for _, _, sentencia in _sentencias(ctx.funcion):
+        if isinstance(sentencia, c.Expresion):
+            raices.append(sentencia.expr)
+        elif isinstance(sentencia, c.Para):
+            raices.extend(e for e in (sentencia.inicio, sentencia.paso) if e is not None)
+    comas: list[c.Binario] = []
+    for raiz in raices:
+        pila = [raiz]
+        while pila:
+            nodo = pila.pop()
+            if not (isinstance(nodo, c.Binario) and nodo.op == ","):
+                continue
+            pila.extend((nodo.izq, nodo.der))
+            izq = an.efectos_de(c.Expresion(expr=nodo.izq), ctx.alias)
+            der = an.efectos_de(c.Expresion(expr=nodo.der), ctx.alias)
+            if an.son_independientes(izq, der) and not con_direccion & (
+                izq.escribe | izq.lee | der.escribe | der.lee
+            ):
+                comas.append(nodo)
+    return comas
+
+
+def conmutar_coma(ctx: Contexto) -> str | None:
+    """
+    Intercambia los dos lados de un operador coma cuyo valor se descarta.
+
+    Contexto:
+        ``i++, v++;`` y ``v++, i++;`` hacen lo mismo, pero el compilador emite los incrementos en el
+        orden en que se escriben, lo que cambia que instruccion ocupa el hueco de salto de un bucle.
+        Tambien se aplica al inicio y al paso de un ``for``. Solo se tocan comas cuyo resultado se
+        descarta (sentencia de expresion, inicio o paso) y cuyos lados son independientes: ninguno
+        escribe lo que el otro lee o escribe, sin llamadas ni variables con la direccion tomada.
+
+    Args:
+        ctx (Contexto): Contexto de la ronda.
+
+    Returns:
+        str | None: Descripcion, o ``None`` si no hay una coma cuyos lados conmuten.
+
+    Ejemplo:
+        descripcion = conmutar_coma(contexto)
+    """
+    coma = _elegir(ctx.azar, _comas_independientes(ctx))
+    if coma is None:
+        return None
+    antes = an.texto_de(coma)
+    coma.izq, coma.der = coma.der, coma.izq
+    return f"conmutar_coma({antes})"
+
+
+# ---------------------------------------------------------------------------------------------------
+# Locales: reasignar a la medida de cada uso y fundir las reasignaciones
+# ---------------------------------------------------------------------------------------------------
+
+
+def _ventana_estable(ctx: Contexto, sentencias: list[c.Sentencia], lectura: an.Efectos) -> bool:
+    """Ninguna de las sentencias (con su contenido) escribe lo que lee la expresion ni es barrera."""
+    return not any(an.escritura_alcanza(an.efectos_profundos(s, ctx.alias), lectura) for s in sentencias)
+
+
+def _reasignacion(
+    ctx: Contexto, bloque: c.Bloque, posiciones: list[int], nombre: str, fuente: c.Expr
+) -> Callable[[], str]:
+    """Aplicacion que repite ``nombre = fuente;`` justo antes de cada sentencia de ``posiciones``."""
+
+    def aplicar() -> str:
+        for posicion in sorted(posiciones, reverse=True):
+            repetida = c.Expresion(expr=c.Asigna("=", c.Id(nombre), copy.deepcopy(fuente)))
+            bloque.items.insert(posicion, repetida)
+        return f"reasignar_medida({nombre} = {an.texto_de(fuente)}, {len(posiciones)} reasignaciones)"
+
+    return aplicar
+
+
+def _reasignaciones_posibles(ctx: Contexto) -> list[Callable[[], str]]:
+    """Locales asignadas una vez y usadas como factor en varias sentencias, con la expresion estable."""
+    declaraciones = _declaraciones_simples(ctx)
+    inseguros = _nombres_inseguros(ctx)
+    aplicaciones: list[Callable[[], str]] = []
+    for bloque, indice, sentencia in _sentencias(ctx.funcion):
+        asignacion = _asignacion_unica_de_local(sentencia, declaraciones)
+        if asignacion is None or sentencia.comentarios:
+            continue
+        nombre, fuente = asignacion
+        identificadores = an.identificadores_de(fuente)
+        if not an.es_pura(fuente) or nombre in identificadores or identificadores & inseguros:
+            continue
+        usos = _usos_de(ctx.funcion, nombre)
+        lecturas = [(s, sitio) for s, sitio in usos if not sitio.lvalue]
+        esperadas = 0 if isinstance(sentencia, c.Decl) else 1
+        posteriores = bloque.items[indice + 1 :]
+        posicion_de = {id(interna): j for j, s in enumerate(posteriores) for interna in _anidadas(s)}
+        if (
+            len(usos) - len(lecturas) != esperadas
+            or not all(isinstance(s.padre, c.Binario) and s.padre.op == "*" for _, s in lecturas)
+            or any(id(s) not in posicion_de for s, _ in lecturas)
+        ):
+            continue
+        con_uso = sorted({posicion_de[id(s)] for s, _ in lecturas})
+        if len(con_uso) < 2 or not _ventana_estable(
+            ctx, posteriores[: con_uso[-1] + 1], an.efectos_de(c.Expresion(expr=fuente), ctx.alias)
+        ):
+            continue
+        aplicaciones.append(_reasignacion(ctx, bloque, [indice + 1 + j for j in con_uso[1:]], nombre, fuente))
+    return aplicaciones
+
+
+def _fusion(bloque: c.Bloque, repetidas: list[c.Sentencia], nombre: str, fuente: c.Expr) -> Callable[[], str]:
+    """Aplicacion que quita las asignaciones repetidas de ``nombre`` y deja la primera."""
+
+    def aplicar() -> str:
+        for sentencia in repetidas:
+            bloque.items.remove(sentencia)
+        return f"reasignar_medida({nombre} = {an.texto_de(fuente)}, fundidas {len(repetidas)})"
+
+    return aplicar
+
+
+def _fusiones_posibles(ctx: Contexto) -> list[Callable[[], str]]:
+    """Locales asignadas varias veces con la misma expresion pura en un bloque, sin cambios entre ellas."""
+    declaraciones = _declaraciones_simples(ctx)
+    inseguros = _nombres_inseguros(ctx)
+    aplicaciones: list[Callable[[], str]] = []
+    for bloque in c.todos_los_bloques(ctx.funcion.cuerpo):
+        grupos: dict[tuple[str, str], list[int]] = {}
+        for indice, sentencia in enumerate(bloque.items):
+            asignacion = _asignacion_unica_de_local(sentencia, declaraciones)
+            if asignacion is not None and isinstance(sentencia, c.Expresion) and an.es_pura(asignacion[1]):
+                grupos.setdefault((asignacion[0], an.texto_de(asignacion[1])), []).append(indice)
+        for (nombre, _), indices in grupos.items():
+            primera = bloque.items[indices[0]]
+            fuente = _asignacion_unica_de_local(primera, declaraciones)
+            assert fuente is not None  # noqa: S101 - ``grupos`` solo recoge asignaciones de locales
+            identificadores = an.identificadores_de(fuente[1])
+            repetidas = [bloque.items[i] for i in indices[1:]]
+            if (
+                not repetidas
+                or nombre in identificadores
+                or identificadores & inseguros
+                or any(s.comentarios for s in repetidas)
+                or _escrituras_en(ctx.funcion.cuerpo, nombre) != len(indices)
+            ):
+                continue
+            entre = [s for s in bloque.items[indices[0] + 1 : indices[-1]] if s not in repetidas]
+            if _ventana_estable(ctx, entre, an.efectos_de(c.Expresion(expr=fuente[1]), ctx.alias)):
+                aplicaciones.append(_fusion(bloque, repetidas, nombre, fuente[1]))
+    return aplicaciones
+
+
+def reasignar_medida(ctx: Contexto) -> str | None:
+    """
+    Repite una asignacion antes de cada sentencia que usa la local como factor, o funde las repeticiones.
+
+    Contexto:
+        ``m = a->x; r1 = m * s; r2 = m * t;`` mantiene ``m`` viva en un registro entre los dos
+        productos; con ``m = a->x;`` repetida antes de cada producto cada uso carga el valor justo antes
+        de necesitarlo y el compilador reparte los registros de otro modo. La inversa funde las
+        asignaciones iguales en una. Ambas exigen una expresion pura que ninguna sentencia de la
+        ventana (con su contenido) escriba ni cruce con una llamada, una local sin direccion tomada,
+        escrita solo por esas asignaciones, y en la expansion todos los usos son factores de productos
+        en al menos dos sentencias distintas del mismo bloque.
+
+    Args:
+        ctx (Contexto): Contexto de la ronda.
+
+    Returns:
+        str | None: Descripcion, o ``None`` si ninguna local admite la expansion ni la fusion.
+
+    Ejemplo:
+        descripcion = reasignar_medida(contexto)
+    """
+    aplicacion = _elegir(ctx.azar, [*_reasignaciones_posibles(ctx), *_fusiones_posibles(ctx)])
+    return None if aplicacion is None else aplicacion()
+
+
+# ---------------------------------------------------------------------------------------------------
+# Locales de tipos enteros distintos: ampliacion de la union
+# ---------------------------------------------------------------------------------------------------
+
+
+def _fuentes_simples(ctx: Contexto, nombre: str) -> list[c.Expr] | None:
+    """Valores que recibe una variable con ``=``, o ``None`` si se escribe de otra forma."""
+    return _escrituras_simples(_usos_de(ctx.funcion, nombre))
+
+
+def _tipos_unificables(ctx: Contexto, primera: c.Decl, segunda: c.Decl) -> bool:
+    """
+    Dos locales se pueden fundir si tienen el mismo tipo o la segunda es una extension de la primera.
+
+    La segunda cabe en la primera sin cambiar de valor y promueve al mismo tipo; ademas solo recibe
+    valores con ``=`` que caben sin cambio en los dos tipos. Asi cada lectura de la segunda ve el mismo
+    valor y la aritmetica que la usa conserva su signo.
+    """
+    if (primera.base, primera.estrellas) == (segunda.base, segunda.estrellas):
+        return True
+    ancha = an.parsear_tipo(primera.base, primera.estrellas)
+    estrecha = an.parsear_tipo(segunda.base, segunda.estrellas)
+    if not (
+        ancha.es_entero
+        and estrecha.es_entero
+        and an.promover(ancha) == an.promover(estrecha)
+        and an.conserva_valor(estrecha, ancha)
+    ):
+        return False
+    fuentes = _fuentes_simples(ctx, segunda.nombre)
+    return fuentes is not None and all(_cabe(ctx, fuente, estrecha, ancha) for fuente in fuentes)
+
+
+# ---------------------------------------------------------------------------------------------------
+# Sentencias: desplazar un avance varias posiciones
+# ---------------------------------------------------------------------------------------------------
+
+
+def _es_avance(ctx: Contexto, sentencia: c.Sentencia, inseguros: set[str]) -> bool:
+    """La sentencia solo escribe una variable local escalar segura y no llama a funciones."""
+    if not isinstance(sentencia, c.Expresion) or sentencia.comentarios:
+        return False
+    escritos = _nombres_escritos(sentencia.expr)
+    tipo = ctx.entorno.locales.get(escritos[0]) if len(escritos) == 1 else None
+    return (
+        tipo is not None
+        and tipo.es_escalar
+        and escritos[0] not in inseguros
+        and not any(isinstance(n, c.Llamada) for n in c.recorrer(sentencia.expr))
+    )
+
+
+def _desplazamientos(ctx: Contexto) -> list[tuple[c.Bloque, int, int]]:
+    """Movimientos (bloque, origen, destino) de una sentencia de avance a mas de una posicion de distancia."""
+    inseguros = _nombres_inseguros(ctx)
+    con_direccion = _locales_con_direccion(ctx.funcion)
+    movimientos: list[tuple[c.Bloque, int, int]] = []
+    for bloque in c.todos_los_bloques(ctx.funcion.cuerpo):
+        for origen, sentencia in enumerate(bloque.items):
+            if not _es_avance(ctx, sentencia, inseguros):
+                continue
+            propios = an.efectos_de(sentencia, ctx.alias)
+            for paso in (-1, 1):
+                destino = origen
+                while 0 <= destino + paso < len(bloque.items) and abs(destino + paso - origen) <= (
+                    ALCANCE_MAXIMO_DE_DESPLAZAMIENTO
+                ):
+                    vecina = an.efectos_de(bloque.items[destino + paso], ctx.alias)
+                    tocadas = propios.lee | propios.escribe | vecina.lee | vecina.escribe
+                    if not an.son_independientes(propios, vecina) or con_direccion & tocadas:
+                        break
+                    destino += paso
+                    if abs(destino - origen) >= 2:
+                        movimientos.append((bloque, origen, destino))
+    return movimientos
+
+
+def desplazar_avance(ctx: Contexto) -> str | None:
+    """
+    Mueve una sentencia que avanza una variable a otra posicion del bloque, a dos o mas de distancia.
+
+    Contexto:
+        ``orden_de_sentencias`` solo intercambia vecinas. Colocar el avance de un puntero antes o despues
+        de los del contador y de la entrada exige cruzar varias sentencias, y cada posicion intermedia
+        da un orden de emision distinto. La sentencia solo escribe una variable local escalar sin
+        direccion tomada, y cada sentencia que cruza es independiente de ella (sin barreras ni
+        dependencias de lectura o escritura), de modo que el resultado es el mismo programa.
+
+    Args:
+        ctx (Contexto): Contexto de la ronda.
+
+    Returns:
+        str | None: Descripcion, o ``None`` si ninguna sentencia de avance puede cruzar dos vecinas.
+
+    Ejemplo:
+        descripcion = desplazar_avance(contexto)
+    """
+    elegido = _elegir(ctx.azar, _desplazamientos(ctx))
+    if elegido is None:
+        return None
+    bloque, origen, destino = elegido
+    bloque.items.insert(destino, bloque.items.pop(origen))
+    return f"desplazar_avance(de {origen} a {destino})"
+
+
+# ---------------------------------------------------------------------------------------------------
+# Direcciones: izar al principio y asignar antes del bucle
+# ---------------------------------------------------------------------------------------------------
+
+
+def _es_aritmetica_de_direccion(ctx: Contexto, expr: c.Expr, fijos: set[str]) -> bool:
+    """
+    Una expresion es una suma de direcciones que no cambia durante la funcion.
+
+    Solo contiene literales, moldes, sumas y restas, parametros que nunca se escriben (``fijos``), y
+    simbolos que no son variables escalares conocidas (tablas, etiquetas), con o sin ``&``.
+    """
+    if isinstance(expr, c.Num):
+        return True
+    if isinstance(expr, c.Id):
+        return expr.nombre in fijos or (
+            expr.nombre not in ctx.entorno.locales and expr.nombre not in ctx.entorno.tabla.globales
+        )
+    if isinstance(expr, c.Conversion):
+        return _es_aritmetica_de_direccion(ctx, expr.operando, fijos)
+    if isinstance(expr, c.Unario) and expr.op == "&":
+        return (
+            isinstance(expr.operando, c.Id)
+            and expr.operando.nombre not in ctx.entorno.locales
+            and expr.operando.nombre not in ctx.entorno.tabla.globales
+        )
+    if isinstance(expr, c.Binario) and expr.op in ("+", "-"):
+        return _es_aritmetica_de_direccion(ctx, expr.izq, fijos) and _es_aritmetica_de_direccion(
+            ctx, expr.der, fijos
+        )
+    return False
+
+
+def _direcciones_izables(ctx: Contexto) -> list[tuple[Sitio, an.Tipo]]:
+    """Moldes a puntero sobre una suma de direcciones fija, con el tipo de la local que los recibiria."""
+    inseguros = _nombres_inseguros(ctx)
+    fijos = {
+        p for p in ctx.entorno.parametros if p not in inseguros and _escrituras_en(ctx.funcion.cuerpo, p) == 0
+    }
+    candidatos: list[tuple[Sitio, an.Tipo]] = []
+    for sentencia, raiz in _todas_las_expresiones(ctx.funcion):
+        for sitio in sitios_de(raiz, sentencia):
+            nodo = sitio.nodo
+            if not (isinstance(nodo, c.Conversion) and nodo.tipo.endswith("*")) or sitio.lvalue:
+                continue
+            tipo = an.parsear_tipo(nodo.tipo)
+            if tipo.es_puntero and _es_aritmetica_de_direccion(ctx, nodo.operando, fijos):
+                candidatos.append((sitio, tipo))
+    return candidatos
+
+
+def izar_direccion(ctx: Contexto) -> str | None:
+    """
+    Calcula una direccion fija ``(T*)((u8*)base + k)`` una vez, al principio del cuerpo, en una local.
+
+    Contexto:
+        Una direccion calculada con un molde sobre una base y un desplazamiento se recalcula en cada
+        uso; guardarla en una local asignada antes de leer nada la fija en un registro. A diferencia de
+        ``local_de_campo``, que adelanta lecturas de memoria, aqui solo se mueve aritmetica de
+        direcciones que no depende de nada que cambie: literales, simbolos que no son variables escalares
+        y parametros que la funcion nunca escribe. Con probabilidad 1/2 sustituye todas las apariciones
+        iguales de la expresion.
+
+    Args:
+        ctx (Contexto): Contexto de la ronda.
+
+    Returns:
+        str | None: Descripcion, o ``None`` si no hay un molde a puntero sobre una direccion fija.
+
+    Ejemplo:
+        descripcion = izar_direccion(contexto)
+    """
+    elegido = _elegir(ctx.azar, _direcciones_izables(ctx))
+    if elegido is None:
+        return None
+    sitio, tipo = elegido
+    nombre = _nombre_temporal(ctx)
+    clave = an.texto_de(sitio.nodo)
+    copia = copy.deepcopy(sitio.nodo)
+    if ctx.azar.random() < PROBABILIDAD_TODAS_LAS_APARICIONES:
+        for sentencia, raiz in list(_todas_las_expresiones(ctx.funcion)):
+            for otro in list(sitios_de(raiz, sentencia)):
+                if not otro.lvalue and an.texto_de(otro.nodo) == clave:
+                    c.reemplazar_hijo(otro.padre, otro.nodo, c.Id(nombre))
+    else:
+        c.reemplazar_hijo(sitio.padre, sitio.nodo, c.Id(nombre))
+    _declarar_temporal(ctx, nombre, tipo)
+    cuerpo = ctx.funcion.cuerpo
+    cuerpo.items.insert(_fin_de_declaraciones(cuerpo), c.Expresion(expr=c.Asigna("=", c.Id(nombre), copia)))
+    return f"izar_direccion({tipo.texto} {nombre} = {clave})"
+
+
+def _es_constante_de_direccion(ctx: Contexto, expr: c.Expr) -> bool:
+    """Una direccion constante: suma de literales y simbolos que no son variables, sin parametros."""
+    return _es_aritmetica_de_direccion(ctx, expr, set())
+
+
+def _asignaciones_adelantables(ctx: Contexto) -> list[tuple[c.Decl, int]]:
+    """Punteros inicializados con una direccion constante cuyo primer uso no abre el cuerpo."""
+    cuerpo = ctx.funcion.cuerpo
+    menciones = [_nombres_en(s) for s in cuerpo.items]
+    candidatos: list[tuple[c.Decl, int]] = []
+    for nombre, (bloque, declaracion) in _declaraciones_simples(ctx).items():
+        if bloque is not cuerpo or declaracion.inicial is None or declaracion.estrellas == 0:
+            continue
+        usos = [
+            i
+            for i, nombres in enumerate(menciones)
+            if nombre in nombres and i >= _fin_de_declaraciones(cuerpo)
+        ]
+        if (
+            usos
+            and usos[0] > _fin_de_declaraciones(cuerpo)
+            and _es_constante_de_direccion(ctx, declaracion.inicial)
+        ):
+            candidatos.append((declaracion, usos[0]))
+    return candidatos
+
+
+def _locales_de_direccion_constante(ctx: Contexto) -> list[tuple[c.Decl, c.Expresion | None, c.Expr]]:
+    """
+    Punteros del cuerpo que reciben una direccion constante una sola vez y se leen despues.
+
+    Devuelve la declaracion, la sentencia ``x = e;`` que da el valor (``None`` si lo da el inicializador) y
+    la direccion.
+    """
+    cuerpo = ctx.funcion.cuerpo
+    candidatos: list[tuple[c.Decl, c.Expresion | None, c.Expr]] = []
+    for nombre, (bloque, declaracion) in _declaraciones_simples(ctx).items():
+        if bloque is not cuerpo or declaracion.estrellas == 0 or _escrituras_en(cuerpo, nombre) != 1:
+            continue
+        asignacion: c.Expresion | None = None
+        fuente = declaracion.inicial
+        if fuente is None:
+            propias = {nombre: (bloque, declaracion)}
+            for sentencia in cuerpo.items:
+                encontrada = _asignacion_unica_de_local(sentencia, propias)
+                if (
+                    isinstance(sentencia, c.Expresion)
+                    and encontrada is not None
+                    and not sentencia.comentarios
+                ):
+                    asignacion, fuente = sentencia, encontrada[1]
+                    break
+        lecturas = len(_usos_de(ctx.funcion, nombre)) - (asignacion is not None)
+        if fuente is not None and lecturas > 0 and _es_constante_de_direccion(ctx, fuente):
+            candidatos.append((declaracion, asignacion, fuente))
+    return candidatos
+
+
+def _asignar_antes(ctx: Contexto, declaracion: c.Decl, primer_uso: int) -> str:
+    """Separa el inicializador de la declaracion y lo asigna justo antes del primer uso."""
+    inicial = declaracion.inicial
+    assert inicial is not None  # noqa: S101 - ``_asignaciones_adelantables`` lo garantiza
+    declaracion.inicial = None
+    ctx.funcion.cuerpo.items.insert(
+        primer_uso, c.Expresion(expr=c.Asigna("=", c.Id(declaracion.nombre), inicial))
+    )
+    return f"asignar_antes_del_bucle({declaracion.nombre} = {an.texto_de(inicial)})"
+
+
+def _acceso_directo(
+    ctx: Contexto, declaracion: c.Decl, asignacion: c.Expresion | None, fuente: c.Expr
+) -> str:
+    """Sustituye cada lectura de la local por su direccion constante y quita la local."""
+    nombre = declaracion.nombre
+    for sentencia, sitio in _usos_de(ctx.funcion, nombre):
+        if sentencia is not asignacion:
+            c.reemplazar_hijo(sitio.padre, sitio.nodo, copy.deepcopy(fuente))
+    if asignacion is not None:
+        ctx.funcion.cuerpo.items.remove(asignacion)
+    _quitar_declaracion(ctx.funcion, nombre)
+    ctx.entorno.locales.pop(nombre, None)
+    return f"asignar_antes_del_bucle({nombre} directo = {an.texto_de(fuente)})"
+
+
+def asignar_antes_del_bucle(ctx: Contexto) -> str | None:
+    """
+    Asigna la direccion de una tabla justo antes de su primer uso, o la usa directamente sin local.
+
+    Contexto:
+        ``T* t = tabla;`` al declarar fija la direccion en un registro durante toda la funcion; asignarla
+        justo antes del bucle donde se usa acorta esa vida y escribir la direccion en cada uso (acceso
+        directo) la elimina. Solo se aplica a una local de puntero cuyo valor es una direccion
+        constante (literales y simbolos que no son variables escalares conocidas, ni parametros), de
+        modo que moverla no cambia lo que vale en ningun uso. La variante de acceso directo exige que la
+        local solo reciba ese valor, una sola vez, y que se lea al menos una vez.
+
+    Args:
+        ctx (Contexto): Contexto de la ronda.
+
+    Returns:
+        str | None: Descripcion, o ``None`` si ninguna local de puntero recibe una direccion constante.
+
+    Ejemplo:
+        descripcion = asignar_antes_del_bucle(contexto)
+    """
+    adelantables = _asignaciones_adelantables(ctx)
+    directas = _locales_de_direccion_constante(ctx)
+    opciones: list[Callable[[], str]] = [
+        partial(_asignar_antes, ctx, declaracion, uso) for declaracion, uso in adelantables
+    ]
+    opciones.extend(
+        partial(_acceso_directo, ctx, declaracion, asignacion, fuente)
+        for declaracion, asignacion, fuente in directas
+    )
+    opcion = _elegir(ctx.azar, opciones)
+    return None if opcion is None else opcion()
+
+
+# ---------------------------------------------------------------------------------------------------
 # Orquestacion
 # ---------------------------------------------------------------------------------------------------
 
@@ -1937,6 +3229,17 @@ MUTACIONES: tuple[tuple[str, Mutacion, float], ...] = (
     ("partir_local", partir_local, 1.5),
     ("propagar_copia_de_campo", propagar_copia_de_campo, 2.0),
     ("introducir_copia_de_campo", introducir_copia_de_campo, 1.0),
+    ("bucle_por_indice", bucle_por_indice, 2.0),
+    ("duplicar_local_de_global", duplicar_local_de_global, 1.5),
+    ("ancho_de_local_de_campo", ancho_de_local_de_campo, 2.0),
+    ("truncar_en_asignacion", truncar_en_asignacion, 1.5),
+    ("encadenar_compuesta", encadenar_compuesta, 2.0),
+    ("sustituir_por_alias", sustituir_por_alias, 2.0),
+    ("conmutar_coma", conmutar_coma, 1.5),
+    ("reasignar_medida", reasignar_medida, 1.5),
+    ("desplazar_avance", desplazar_avance, 2.0),
+    ("izar_direccion", izar_direccion, 1.0),
+    ("asignar_antes_del_bucle", asignar_antes_del_bucle, 1.0),
 )
 INTENTOS_POR_MUTACION = 12
 MAX_VECINOS_POR_MUTACION = 5000

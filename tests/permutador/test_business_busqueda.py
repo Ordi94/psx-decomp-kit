@@ -48,13 +48,13 @@ class Reloj:
 
 
 def evaluador_por_temporales(cierre: int | None = None) -> pm.Evaluador:
-    """Puntua 50 menos 10 por cada temporal asignado; con ``cierre`` coincide al llegar a ese numero."""
+    """Puntua 50 menos 10 por cada temporal (minimo 10); con ``cierre`` coincide al llegar a ese numero."""
 
     def evaluar(texto: str, umbral: int) -> ev.ResultadoEvaluacion:
         cantidad = texto.count("tmp1 =") + texto.count("tmp2 =") + texto.count("tmp3 =")
         if cierre is not None and cantidad >= cierre:
             return ev.ResultadoEvaluacion(0, coincide=True)
-        return ev.ResultadoEvaluacion(50 - 10 * cantidad)
+        return ev.ResultadoEvaluacion(max(10, 50 - 10 * cantidad))
 
     return evaluar
 
