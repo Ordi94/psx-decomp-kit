@@ -287,12 +287,63 @@ def _locales_con_direccion(funcion: c.Funcion) -> set[str]:
     }
 
 
+def _estructura_del_almacen(ctx: Contexto, sentencia: c.Sentencia) -> str | None:
+    """
+    Estructura cuyo campo escribe ``p->campo = e;`` (o ``op=``) cuando ``e`` no toca la memoria.
+
+    Devuelve ``None`` si la sentencia es otra cosa, si ``e`` accede a memoria, llama o incrementa, o si
+    el puntero no apunta a una estructura conocida de la tabla de tipos.
+    """
+    if not (isinstance(sentencia, c.Expresion) and isinstance(sentencia.expr, c.Asigna)):
+        return None
+    destino = sentencia.expr.destino
+    if not (isinstance(destino, c.Miembro) and destino.flecha and isinstance(destino.base, c.Id)):
+        return None
+    toca_memoria = any(
+        isinstance(n, c.Miembro | c.Indice | c.Llamada | c.Postfijo)
+        or (isinstance(n, c.Unario) and n.op in ("*", "++", "--"))
+        for n in c.recorrer(sentencia.expr.valor)
+    )
+    tipo = ctx.entorno.inferir(destino.base)
+    if toca_memoria or tipo is None or not tipo.es_puntero or tipo.estrellas != 1:
+        return None
+    nombre = an.nombre_de_estructura(tipo.base)
+    return nombre if nombre in ctx.entorno.tabla.estructuras else None
+
+
+def _almacenes_a_estructuras_distintas(
+    ctx: Contexto, primera: c.Sentencia, segunda: c.Sentencia, a: an.Efectos, b: an.Efectos
+) -> bool:
+    """
+    Dos sentencias escriben campos de estructuras distintas y no comparten ninguna variable escrita.
+
+    Un campo con el mismo nombre en dos estructuras distintas es memoria distinta, pero las rutas de
+    memoria se identifican solo por el nombre del campo y ``son_independientes`` las daria por
+    solapadas. Con la hipotesis de aliasing del modulo (estructuras distintas no se solapan), basta
+    que las variables que las dos sentencias leen y escriben no se crucen.
+    """
+    estructura_a, estructura_b = _estructura_del_almacen(ctx, primera), _estructura_del_almacen(ctx, segunda)
+    if estructura_a is None or estructura_b is None or estructura_a == estructura_b:
+        return False
+    solo_variables = [
+        an.Efectos(
+            lee={u for u in e.lee if u.startswith("v:")},
+            escribe={u for u in e.escribe if u.startswith("v:")},
+            barrera=e.barrera,
+        )
+        for e in (a, b)
+    ]
+    return an.son_independientes(solo_variables[0], solo_variables[1])
+
+
 def orden_de_sentencias(ctx: Contexto) -> str | None:
     """
     Intercambia dos sentencias de expresion consecutivas que no dependen una de la otra.
 
     Contexto:
         El orden de sentencias independientes cambia la planificacion y la vida de los registros.
+        Tambien se intercambian dos almacenes ``p->campo = e;`` a punteros de estructuras distintas
+        aunque el campo se llame igual, mientras ninguno lea memoria ni comparta variables escritas.
 
     Args:
         ctx (Contexto): Contexto de la ronda.
@@ -311,7 +362,10 @@ def orden_de_sentencias(ctx: Contexto) -> str | None:
             b = an.efectos_de(bloque.items[indice + 1], ctx.alias)
             # Una variable con direccion tomada puede escribirse por un puntero: no se mueve.
             tocadas = a.lee | a.escribe | b.lee | b.escribe
-            if an.son_independientes(a, b) and not con_direccion & tocadas:
+            conmutan = an.son_independientes(a, b) or _almacenes_a_estructuras_distintas(
+                ctx, bloque.items[indice], bloque.items[indice + 1], a, b
+            )
+            if conmutan and not con_direccion & tocadas:
                 candidatos.append((bloque, indice))
     elegido = _elegir(ctx.azar, candidatos)
     if elegido is None:

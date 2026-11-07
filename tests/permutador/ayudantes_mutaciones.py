@@ -20,11 +20,15 @@ typedef struct Mundo {
     s32 escala;
     Nodo* cabeza;
 } Mundo;
+typedef struct Registro {
+    s32 valor;
+    s32 otro;
+} Registro;
 extern s32 D_global;
 extern s32 D_otra;
 extern Nodo tabla[8];
 """
-TIPOS = frozenset({"Nodo", "Mundo"})
+TIPOS = frozenset({"Nodo", "Mundo", "Registro", "Desconocido"})
 FIRMA = "void f(Nodo* p, Nodo* q, Mundo* m, s32 a, s32 b)"
 
 Mutacion = Callable[[mut.Contexto], str | None]
