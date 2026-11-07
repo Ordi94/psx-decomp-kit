@@ -2,6 +2,33 @@
 
 El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y el versionado es semantico.
 
+## [0.2.0] - 2026-11-07
+
+### Anadido
+
+Once mutaciones nuevas del buscador de variantes del permutador, cada una con las comprobaciones de seguridad
+semantica de las existentes:
+
+- `bucle_por_indice`: sustituye el puntero que recorre un bucle por el acceso indexado `base[i]` en todas las
+  sentencias del bucle.
+- `duplicar_local_de_global`: da una segunda local a la segunda lectura del mismo global en un tramo posterior.
+- `ancho_de_local_de_campo`: cambia el ancho de una local que solo se copia a destinos de 16 bits o menos.
+- `truncar_en_asignacion`: pasa una local estrecha a 32 bits con un molde en la asignacion, y la inversa.
+- `encadenar_compuesta`: convierte `res = reg + c` en `res += c` cuando `res` y `reg` valen lo mismo.
+- `sustituir_por_alias`: cambia un operando de una igualdad por otra variable que vale lo mismo en ese punto.
+- `conmutar_coma`: intercambia los lados de una coma cuyo valor se descarta, tambien en el `for`.
+- `reasignar_medida`: repite la asignacion de una local usada como factor antes de cada uso, y funde las repeticiones.
+- `desplazar_avance`: mueve una sentencia de avance a dos o mas posiciones de distancia.
+- `izar_direccion`: calcula una direccion fija `(T*)((u8*)base + k)` una vez al principio del cuerpo.
+- `asignar_antes_del_bucle`: asigna la direccion de una tabla justo antes de su primer uso, o la usa sin local.
+
+### Cambiado
+
+- `unificar_locales` funde tambien una local entera estrecha dentro de una de 32 bits que la contiene, si solo
+  recibe valores que caben en ambos tipos.
+- `orden_sentencias` intercambia dos almacenes a campos de igual nombre de estructuras conocidas y distintas.
+- El README documenta la tabla de mutaciones con su peso.
+
 ## [0.1.1] - 2026-11-05
 
 ### Corregido

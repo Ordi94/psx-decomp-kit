@@ -17,7 +17,7 @@ Un paquete Python, `psxdecomp`, con las piezas genericas de un proyecto de desco
 - instalacion verificada del toolchain externo (SDK, binutils, `maspsx`, `asm-differ`);
 - cargador y validador del manifiesto `psxdecomp.toml`, unica fuente de todo lo que depende del proyecto.
 
-Version 0.1.1, Python 3.13 o superior, licencia MIT.
+Version 0.2.0, Python 3.13 o superior, licencia MIT.
 
 ## Que no es
 
@@ -384,6 +384,48 @@ ejecutables, rutas ni convenciones de ningun juego.
 | `permutador.estado` | Estado persistente de una busqueda en `<build>/permutar/<funcion>/` (`estado.json`, `registro.jsonl`, `mejor.c`, `actual.c`). `carpeta_de` recibe la carpeta de build del proyecto. |
 | `permutador.evaluacion` | Medicion de una variante con la misma cadena y puntuacion que `diff`: sustituye la definicion en el texto del archivo, compila, comprueba que el objeto define la funcion y puntua. `preparar_medicion` recibe `Rutas`, `Convenciones`, `Compilacion` y el nombre del ejecutable. |
 | `permutador.busqueda` | Escalada con reinicios aleatorios sobre las variantes, en varios hilos, con estado reanudable (`permutar_funcion`, `Busqueda`, `Opciones`, `Resumen`). Recibe las mismas secciones del manifiesto; `leer_cabeceras` usa `rutas.incluir`. Nunca escribe en la carpeta de fuentes. |
+
+### Mutaciones
+
+`permutador.mutaciones.MUTACIONES` registra cada reformulacion con su nombre y su peso en el sorteo. Todas
+conservan el significado del C, se aplican sobre una copia del arbol y se descartan si no son seguras en el
+sitio elegido (devuelven `None`). `mutaciones.vecinos` recorre el vecindario completo de una mutacion antes
+de que la busqueda sortee.
+
+| Mutacion | Peso | Reformulacion |
+|---|---|---|
+| `orden_sentencias` | 3,0 | Intercambia dos sentencias consecutivas independientes, incluidos dos almacenes a campos homonimos de estructuras distintas. |
+| `orden_declaraciones` | 2,0 | Mueve una declaracion local dentro de su serie. |
+| `introducir_temporal` | 4,0 | Copia una subexpresion pura a una local declarada antes de su sentencia. |
+| `eliminar_temporal` | 2,0 | Sustituye un temporal de un solo uso por su expresion. |
+| `ancho_temporal` | 2,0 | Cambia el tipo entero de una local si todo valor que recibe cabe en ambos tipos. |
+| `copiar_parametro` | 1,0 | Copia un parametro de solo lectura a una local. |
+| `operandos_conmutados` | 3,0 | Intercambia los operandos de un operador conmutativo o invierte una comparacion. |
+| `indice_o_puntero` | 2,0 | Alterna `p[i]`/`*(p + i)` y `p->c`/`(*p).c`. |
+| `condicion_invertida` | 2,0 | Niega la condicion de un `if` con `else` e intercambia sus ramas. |
+| `bucle` | 1,5 | Cambia `for` por `while` y a la inversa. |
+| `asignacion_compuesta` | 2,0 | Alterna `x = x op e` y `x op= e`. |
+| `local_de_campo` | 3,0 | Lee un campo en una local nueva en una sentencia anterior. |
+| `releer_en_condicion` | 1,5 | Sustituye una local que guarda una lectura de memoria por esa lectura. |
+| `unificar_locales` | 1,5 | Funde dos locales de vidas disjuntas del mismo tipo, o una estrecha dentro de una de 32 bits que la contiene. |
+| `partir_local` | 1,5 | Reparte una local compartida por ramas excluyentes en una local por rama. |
+| `propagar_copia_de_campo` | 2,0 | Elimina la local que copia `campo op c` y lo devuelve al campo. |
+| `introducir_copia_de_campo` | 1,0 | Inversa de la anterior. |
+| `bucle_por_indice` | 2,0 | Sustituye el puntero que recorre un bucle por `base[i]` en todas las sentencias del bucle. |
+| `duplicar_local_de_global` | 1,5 | Da una segunda local a la segunda lectura del mismo global en un tramo posterior. |
+| `ancho_de_local_de_campo` | 2,0 | Cambia el ancho de una local que solo se copia a destinos de 16 bits o menos. |
+| `truncar_en_asignacion` | 1,5 | Pasa una local estrecha a `s32` con un molde en cada asignacion, o a la inversa. |
+| `encadenar_compuesta` | 2,0 | Pasa `res = reg op e` a `res op= e` cuando ambas variables valen lo mismo en ese punto. |
+| `sustituir_por_alias` | 2,0 | Cambia un operando de una igualdad por otra variable que vale lo mismo. |
+| `conmutar_coma` | 1,5 | Intercambia los lados de una coma cuyo valor se descarta, tambien en el inicio y paso de un `for`. |
+| `reasignar_medida` | 1,5 | Repite la asignacion de una local usada como factor antes de cada uso, o funde las repeticiones. |
+| `desplazar_avance` | 2,0 | Mueve una sentencia que avanza una variable a dos o mas posiciones de distancia. |
+| `izar_direccion` | 1,0 | Calcula una direccion fija `(T*)((u8*)base + k)` una vez al principio del cuerpo. |
+| `asignar_antes_del_bucle` | 1,0 | Asigna la direccion de una tabla justo antes de su primer uso, o la usa sin local. |
+
+Las mutaciones que razonan sobre el valor de una variable en un punto usan el seguimiento de copias vigentes
+de un bloque: solo copias directas entre variables seguras (sin la direccion tomada ni nombre ambiguo) del
+mismo tipo escalar, que cualquier escritura posterior, etiqueta o salto anula.
 
 ## Construccion
 
