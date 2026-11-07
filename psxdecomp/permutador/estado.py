@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,6 +26,8 @@ VERSION_ESTADO = 1
 BUILD_POR_DEFECTO = RUTAS_SENCILLAS_POR_DEFECTO["build"]
 SUBCARPETA_PERMUTADOR = "permutar"
 ARCHIVOS_DEL_ESTADO = ("mejor.c", "actual.c", "estado.json", "registro.jsonl")
+REINTENTOS_DE_REEMPLAZO = 6
+ESPERA_ENTRE_REEMPLAZOS_S = 0.05
 
 
 @dataclass
@@ -78,6 +81,35 @@ def carpeta_de(raiz: Path, funcion: str, build: str = BUILD_POR_DEFECTO) -> Path
     return raiz / build / SUBCARPETA_PERMUTADOR / funcion
 
 
+def _reemplazar(temporal: str, destino: Path) -> None:
+    """
+    Reemplaza el destino por el archivo temporal, reintentando si otro proceso lo tiene abierto.
+
+    Contexto:
+        En Windows, ``os.replace`` falla con ``PermissionError`` mientras un antivirus o un indexador
+        mantiene abierto el destino unos milisegundos. El fallo es transitorio: se reintenta unas pocas
+        veces con una espera creciente y, si persiste, se propaga el ultimo error.
+
+    Args:
+        temporal (str): Ruta del archivo ya escrito.
+        destino (Path): Archivo que se reemplaza.
+
+    Raises:
+        PermissionError: Si el destino sigue bloqueado tras ``REINTENTOS_DE_REEMPLAZO`` intentos.
+
+    Ejemplo:
+        _reemplazar(str(temporal), carpeta / "estado.json")
+    """
+    for intento in range(REINTENTOS_DE_REEMPLAZO - 1):
+        try:
+            os.replace(temporal, destino)
+        except PermissionError:
+            time.sleep(ESPERA_ENTRE_REEMPLAZOS_S * (intento + 1))
+        else:
+            return
+    os.replace(temporal, destino)
+
+
 def _escribir_atomico(destino: Path, contenido: str) -> None:
     """Escribe un archivo de texto reemplazandolo de una vez."""
     destino.parent.mkdir(parents=True, exist_ok=True)
@@ -85,7 +117,7 @@ def _escribir_atomico(destino: Path, contenido: str) -> None:
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as salida:
             salida.write(contenido)
-        os.replace(temporal, destino)
+        _reemplazar(temporal, destino)
     except BaseException:
         Path(temporal).unlink(missing_ok=True)
         raise

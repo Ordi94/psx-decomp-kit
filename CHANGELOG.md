@@ -29,6 +29,11 @@ semantica de las existentes:
 - `orden_sentencias` intercambia dos almacenes a campos de igual nombre de estructuras conocidas y distintas.
 - El README documenta la tabla de mutaciones con su peso.
 
+### Corregido
+
+- La escritura del estado del permutador reintenta el reemplazo del archivo cuando Windows lo tiene abierto
+  un instante (antivirus, indexador) en lugar de abortar la busqueda con un error de permisos.
+
 ## [0.1.1] - 2026-11-05
 
 ### Corregido
