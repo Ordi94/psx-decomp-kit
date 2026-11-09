@@ -35,6 +35,7 @@ from psxdecomp.construccion.infraestructura import (
 from psxdecomp.construccion.salidas import SUBCARPETA_DIFF as _SUBCARPETA_DIFF
 from psxdecomp.construccion.salidas import calcular_salidas
 from psxdecomp.diff import fuentes_c
+from psxdecomp.diff.ejes import EjesPuntuacion, ejes_desde_json
 from psxdecomp.diff.enlace_diff import bytes_coinciden, contar_referencias_numericas
 from psxdecomp.diff.fuentes_c import EstadoFuncion
 from psxdecomp.dominio import Compilacion, Convenciones, Rutas
@@ -77,6 +78,8 @@ class ResultadoDiff:
             no se registro).
         truncado: Si ``asm-differ`` corto el desensamblado del candidato en el limite de lineas, de
             modo que la puntuacion y el texto son parciales.
+        ejes: Puntuacion secundaria en tres ejes (``psxdecomp.diff.ejes``); ``None`` si la salida de
+            ``asm-differ`` no permitio calcularla. No sustituye a ``puntuacion``.
     """
 
     funcion: str
@@ -87,6 +90,7 @@ class ResultadoDiff:
     referencias_numericas: int = 0
     puntuacion_asm: int | None = None
     truncado: bool = False
+    ejes: EjesPuntuacion | None = None
 
     @property
     def coincide(self) -> bool:
@@ -447,6 +451,8 @@ def comparar_funcion(
     convenciones: Convenciones,
     compilacion: Compilacion,
     nombre_ejecutable: str,
+    valor_g: int | None = None,
+    guardar: bool = True,
 ) -> ResultadoDiff:
     """
     Compara una funcion compilada desde C con su objetivo original.
@@ -467,6 +473,10 @@ def comparar_funcion(
         compilacion (Compilacion): Seccion ``[compilacion]`` (version de ``ASPSX`` y opciones).
         nombre_ejecutable (str): Nombre del ejecutable reconstruido; fija el ELF contra el que se
             resuelven los simbolos al comparar por bytes.
+        valor_g (int | None, opcional): Umbral ``-G`` que sustituye al del archivo de opciones para esta
+            comparacion (lo usa ``--probar-g``); ``None`` usa el declarado.
+        guardar (bool, opcional): Si es falso no escribe ``<funcion>.resultado.json``: una prueba de
+            ``-G`` no debe cambiar la cifra que ``progreso`` contrasta con el comentario de pendiente.
 
     Returns:
         ResultadoDiff: Puntuacion y diferencias.
@@ -507,6 +517,8 @@ def comparar_funcion(
             convenciones=convenciones,
             compilacion=compilacion,
             nombre_ejecutable=nombre_ejecutable,
+            valor_g=valor_g,
+            guardar=guardar,
         )
 
 
@@ -523,6 +535,8 @@ def _comparar_en(
     convenciones: Convenciones,
     compilacion: Compilacion,
     nombre_ejecutable: str,
+    valor_g: int | None,
+    guardar: bool,
 ) -> ResultadoDiff:
     """Compila el candidato y puntua la funcion dentro de la carpeta de trabajo ya creada."""
     objetivo, retornos, max_lineas = preparar_objetivo(
@@ -537,7 +551,11 @@ def _comparar_en(
         ejecutar,
         definiciones=(convenciones.macro_no_coincidente,),
         exigir_solo_texto=False,
-        valor_g=leer_valores_g(raiz, rutas=rutas, convenciones=convenciones).get(Path(archivo).stem, 0),
+        valor_g=(
+            valor_g
+            if valor_g is not None
+            else leer_valores_g(raiz, rutas=rutas, convenciones=convenciones).get(Path(archivo).stem, 0)
+        ),
         opciones_extra=leer_opciones_por_archivo(raiz, rutas=rutas, convenciones=convenciones).get(
             Path(archivo).stem, ()
         ),
@@ -582,8 +600,138 @@ def _comparar_en(
         )
         referencias = contar_referencias_numericas(texto) if iguales else 0
     informada = 0 if iguales else puntuacion
-    guardar_resultado(raiz, funcion, informada, max_lineas, truncado=truncado, rutas=rutas)
-    return ResultadoDiff(funcion, archivo, informada, texto, iguales, referencias, puntuacion, truncado)
+    if guardar:
+        guardar_resultado(raiz, funcion, informada, max_lineas, truncado=truncado, rutas=rutas)
+    ejes = EjesPuntuacion() if iguales else ejes_desde_json(salida_json)
+    return ResultadoDiff(funcion, archivo, informada, texto, iguales, referencias, puntuacion, truncado, ejes)
+
+
+VALORES_G_A_PROBAR = (0, 8)
+"""Umbrales ``-G`` que compara ``--probar-g``: sin datos pequenos y el valor que suelen usar los juegos."""
+
+
+def comparar_con_valores_g(
+    raiz: Path,
+    funcion: str,
+    herramientas: HerramientasCompilacion,
+    script_diff: Path,
+    ejecutar: Ejecutor,
+    *,
+    rutas: Rutas,
+    convenciones: Convenciones,
+    compilacion: Compilacion,
+    nombre_ejecutable: str,
+) -> list[tuple[int, ResultadoDiff]]:
+    """
+    Compila el archivo de una funcion con cada umbral de ``VALORES_G_A_PROBAR`` y puntua cada uno.
+
+    Contexto:
+        Paso previo opcional (``--probar-g``) de ``diff`` y ``permutar``: a veces la funcion cierra sin
+        tocar el C porque el original uso otro ``-G``. Solo informa: no escribe el archivo de opciones
+        de compilacion ni el resultado que ``progreso`` contrasta (``guardar=False``).
+
+    Args:
+        raiz (Path): Raiz del repositorio.
+        funcion (str): Nombre de la funcion.
+        herramientas (HerramientasCompilacion): Herramientas de compilacion.
+        script_diff (Path): Ruta de ``diff.py`` de ``asm-differ``.
+        ejecutar (Ejecutor): Ejecutor de procesos.
+        rutas (Rutas): Seccion ``[rutas]`` del manifiesto.
+        convenciones (Convenciones): Seccion ``[convenciones]`` (tope de ``-G``).
+        compilacion (Compilacion): Seccion ``[compilacion]``.
+        nombre_ejecutable (str): Nombre del ejecutable reconstruido.
+
+    Returns:
+        list[tuple[int, ResultadoDiff]]: Cada umbral probado con su resultado, en el orden de
+        ``VALORES_G_A_PROBAR``.
+
+    Raises:
+        ValueError: Si un umbral supera ``Convenciones.max_valor_g`` o la funcion no es valida.
+        FuncionSinCError: Si la funcion sigue solo en ensamblador.
+        ProcesoError: Si una herramienta falla.
+
+    Ejemplo:
+        resultados = comparar_con_valores_g(
+            Path("."), "rutina_a", herramientas, script, ejecutar,
+            rutas=rutas, convenciones=convenciones, compilacion=compilacion,
+            nombre_ejecutable="EJEC_001.00",
+        )
+    """
+    return [
+        (
+            valor,
+            comparar_funcion(
+                raiz,
+                funcion,
+                herramientas,
+                script_diff,
+                ejecutar,
+                rutas=rutas,
+                convenciones=convenciones,
+                compilacion=compilacion,
+                nombre_ejecutable=nombre_ejecutable,
+                valor_g=valor,
+                guardar=False,
+            ),
+        )
+        for valor in VALORES_G_A_PROBAR
+    ]
+
+
+def formatear_probar_g(resultados: list[tuple[int, ResultadoDiff]], valor_declarado: int) -> list[str]:
+    """
+    Da las lineas con que ``--probar-g`` muestra las cifras de cada umbral.
+
+    Contexto:
+        Una linea por umbral, marcando el que el archivo de opciones ya declara, y un aviso final: la
+        herramienta propone, nunca escribe el archivo de opciones de compilacion.
+
+    Args:
+        resultados (list[tuple[int, ResultadoDiff]]): Salida de ``comparar_con_valores_g``.
+        valor_declarado (int): Umbral que el archivo de opciones declara para el archivo (0 si ninguno).
+
+    Returns:
+        list[str]: Lineas listas para imprimir.
+
+    Ejemplo:
+        for linea in formatear_probar_g(resultados, 0):
+            print(linea)
+    """
+    lineas = [
+        f"-G{valor}: puntuacion {resultado.puntuacion}"
+        + (" (el declarado)" if valor == valor_declarado else "")
+        for valor, resultado in resultados
+    ]
+    lineas.append("aviso: solo informativo; el archivo de opciones de compilacion no se modifica")
+    return lineas
+
+
+def resultado_a_json(resultado: ResultadoDiff) -> str:
+    """
+    Serializa un resultado de ``diff`` como JSON (camelCase) con la puntuacion y los tres ejes.
+
+    Contexto:
+        Salida de ``diff --json``. La cifra de ``puntuacion`` es la de siempre; ``ejes`` solo la describe.
+
+    Args:
+        resultado (ResultadoDiff): Resultado de comparar una funcion.
+
+    Returns:
+        str: Un objeto JSON en una sola linea.
+
+    Ejemplo:
+        print(resultado_a_json(resultado))
+    """
+    datos: dict[str, object] = {
+        "funcion": resultado.funcion,
+        "archivo": resultado.archivo,
+        "puntuacion": resultado.puntuacion,
+        "coincide": resultado.coincide,
+        "truncado": resultado.truncado,
+        "bytesIguales": resultado.bytes_iguales,
+        "ejes": None if resultado.ejes is None else resultado.ejes.como_json(),
+    }
+    return json.dumps(datos)
 
 
 def ruta_resultado(funcion: str, *, rutas: Rutas) -> str:

@@ -87,8 +87,13 @@ def test_el_registro_agrega_una_linea_por_mejora(tmp_path: Path) -> None:
     est.anadir_registro(tmp_path / "x", 9, 590, ["a", "b"])
     lineas = (tmp_path / "x" / "registro.jsonl").read_text(encoding="utf-8").splitlines()
     assert [json.loads(linea) for linea in lineas] == [
-        {"iteracion": 5, "puntuacion": 600, "mutaciones": ["orden_sentencias(posiciones 1 y 2)"]},
-        {"iteracion": 9, "puntuacion": 590, "mutaciones": ["a", "b"]},
+        {
+            "iteracion": 5,
+            "puntuacion": 600,
+            "mutaciones": ["orden_sentencias(posiciones 1 y 2)"],
+            "envolturas": 0,
+        },
+        {"iteracion": 9, "puntuacion": 590, "mutaciones": ["a", "b"], "envolturas": 0},
     ]
 
 

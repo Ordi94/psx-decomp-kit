@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from psxdecomp.diff.comparacion import FuncionSinCError
+from psxdecomp.diff.ejes import EjesPuntuacion
 from psxdecomp.permutador import evaluacion as ev
 
 from construccion.test_compilacion import herramientas
@@ -122,7 +123,7 @@ def test_evaluar_compila_con_la_macro_y_el_g_del_archivo_y_devuelve_la_puntuacio
 def test_una_variante_que_puntua_cero_coincide(raiz: Path) -> None:
     objetivo = preparar(raiz, EjecutorPermutar(lambda texto: 0))
     assert ev.evaluar(objetivo, CUERPO_FUNCION, comprobar_bytes_bajo=10) == ev.ResultadoEvaluacion(
-        0, coincide=True
+        0, coincide=True, ejes=EjesPuntuacion()
     )
 
 
@@ -173,7 +174,7 @@ def test_una_salida_ilegible_de_asm_differ_se_descarta(raiz: Path) -> None:
 @pytest.mark.parametrize(
     ("iguales", "esperado"),
     [
-        (True, ev.ResultadoEvaluacion(0, coincide=True)),
+        (True, ev.ResultadoEvaluacion(0, coincide=True, ejes=EjesPuntuacion())),
         (False, ev.ResultadoEvaluacion(5)),
         (None, ev.ResultadoEvaluacion(None, "la variante no enlaza en la direccion de la funcion")),
     ],

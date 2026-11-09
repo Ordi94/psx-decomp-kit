@@ -74,7 +74,7 @@ def test_la_macro_de_no_coincidencia_del_manifiesto_es_la_que_se_define_al_compi
     objetivo = preparar(tmp_path, ejecutor, convenciones=CONVENCIONES_PROPIAS)
     assert objetivo.convenciones is CONVENCIONES_PROPIAS
     ejecutor.comandos.clear()
-    assert ev.evaluar(objetivo, CUERPO_FUNCION, comprobar_bytes_bajo=0) == ev.ResultadoEvaluacion(25)
+    assert ev.evaluar(objetivo, CUERPO_FUNCION, comprobar_bytes_bajo=0).puntuacion == 25
     assert "-DNO_COINCIDE" in ejecutor.comandos[0]
     assert "-DNON_MATCHING" not in ejecutor.comandos[0]
 

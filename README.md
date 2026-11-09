@@ -146,6 +146,26 @@ Deben cumplir `juego_desde < librerias_desde < librerias_hasta`, dentro de la RA
 | `version_aspsx` | `"2.80"` | Version del ensamblador original que imita `maspsx`, `major.minor`. Es un dato del binario. |
 | `opciones_compilador` | `["-quiet", "-O2"]` | Hasta 16 opciones del compilador, sin `-G` ni `-o`. Una lista vacia es valida. |
 
+### Archivo de opciones de compilacion (`rutas.opciones_compilacion`)
+
+TOML del proyecto con las tablas `archivos`, `enlace` y `datos_pequenos`. Cada archivo C (nombre sin carpeta
+ni `.c`) declara en `[archivos.<nombre>]` su umbral `g` y, opcionalmente, opciones propias del compilador:
+
+```toml
+[archivos.modulo_a]
+g = 8
+opciones = ["-fno-schedule-insns"]
+```
+
+| Clave | Defecto | Contenido |
+|---|---|---|
+| `g` | `0` | Umbral `-G` de datos pequenos, de 0 a `max_valor_g`. |
+| `opciones` | `[]` | Hasta 16 cadenas sin repetidos que empiezan por `-` y una letra, sin espacios (la misma lista de admitidas que `opciones_compilador`: no admite `-G` ni `-o`). |
+
+`build`, `diff`, `probar` y `permutar` anaden `opciones` al comando del compilador de ESE archivo, despues de
+las opciones globales de `[compilacion]` y antes de `-G`; los demas archivos no cambian. Sin la clave el comando
+es identico al de siempre.
+
 ### `[plugins]` (todas opcionales)
 
 `subcomandos`, `antes_de_construir`, `despues_de_verificar` (listas) y `entrada_progreso` (una referencia),
@@ -422,10 +442,51 @@ de que la busqueda sortee.
 | `desplazar_avance` | 2,0 | Mueve una sentencia que avanza una variable a dos o mas posiciones de distancia. |
 | `izar_direccion` | 1,0 | Calcula una direccion fija `(T*)((u8*)base + k)` una vez al principio del cuerpo. |
 | `asignar_antes_del_bucle` | 1,0 | Asigna la direccion de una tabla justo antes de su primer uso, o la usa sin local. |
+| `mover_sentencia_a_distancia` | 2,0 | Mueve una sentencia de dos a ocho posiciones en su bloque cruzando solo sentencias independientes; una declaracion con inicializador se mueve entera en la serie de declaraciones o solo su asignacion. |
+| `envolver_en_bloque` | 1,0 | Envuelve sentencias contiguas (con una llamada, o todo el bloque) en `do { ... } while (0);`. Produce candidatos marcados: ver "Envolturas". |
+| `dividir_local_multiset` | 1,5 | Reparte una local asignada varias veces del cuerpo en una local fresca por asignacion. |
+| `expandir_local` | 1,5 | Sustituye una local de una asignacion y un uso por su expresion, aunque no esten juntos. |
+| `cadena_de_asignacion` | 1,5 | Alterna `a = e; b = e;` y `a = b = e;`. |
+| `dividir_asignacion` | 1,5 | Alterna `r = a + b + c;` con `r = a + b; r = r + c;` o `r = a; r += b + c;`. |
+| `ajustar_desigualdad` | 1,5 | Alterna `a < k` con `a <= k - 1` y `a > k` con `a >= k + 1` sin salirse del tipo. |
+| `forma_de_acceso_a_struct` | 1,5 | Alterna `a[i].c`, `(a + i)->c`, `(&a[i])->c` y `(*(a + i)).c`. |
+| `cast_en_subexpresion` | 1,5 | Anade o quita un molde `(s16)`, `(u16)`, `(u8)` o `(s32)` sobre una subexpresion aritmetica cuando no cambia el valor. |
+| `ancho_de_variable_de_retorno` | 1,0 | Pasa a 16 bits una local de 32 bits que solo recibe retornos de llamadas y solo se lee truncada. |
+| `limite_en_local_antes_del_incremento` | 1,0 | Lee el limite de un bucle `do` en una local justo antes de la sentencia de avance. |
+| `copia_local_por_rama` | 1,0 | Copia un puntero donde se define y lo usa solo en una rama de un `if`. |
 
 Las mutaciones que razonan sobre el valor de una variable en un punto usan el seguimiento de copias vigentes
 de un bloque: solo copias directas entre variables seguras (sin la direccion tomada ni nombre ambiguo) del
 mismo tipo escalar, que cualquier escritura posterior, etiqueta o salto anula.
+
+### Envolturas
+
+Una envoltura `do { ... } while (0);` no genera codigo: cambia la prioridad entre pseudoregistros del
+compilador. Por eso `envolver_en_bloque` solo produce CANDIDATOS que una persona debe justificar con el
+volcado del compilador antes de aplicarlos. La marca es comprobable en tres sitios:
+
+- `estado.json` guarda `envolturas`: las que `mejor.c` anade al C de partida.
+- Cada linea de `registro.jsonl` lleva `envolturas` (cero si ninguna) y, si se pudo calcular, `ejes`.
+- `mejor.c` lleva, tras la linea de puntuacion, un comentario de una linea
+  (`/* El candidato contiene N envolturas do { } while (0) sin codigo que requieren justificacion ... */`)
+  solo si `envolturas` es mayor que cero; el resumen de `permutar` repite el aviso.
+
+El filtro que rechaza `register`, `volatile`, `asm` y `GLOBAL_ASM` sigue igual.
+
+### Puntuacion secundaria
+
+La cifra de `asm-differ` es la funcion objetivo de la busqueda. Ademas se calculan tres contadores que
+describen la diferencia sin cambiar la busqueda (`psxdecomp.diff.ejes`): diferencias de registro u operando
+entre lineas alineadas con el mismo mnemonico, lineas presentes en ambos lados en distinta posicion
+(reordenacion) y lineas insertadas o borradas. `diff --json` imprime la puntuacion y los ejes
+(`diferenciasDeOperando`, `lineasReordenadas`, `lineasInsertadasOBorradas`) y cada linea de `registro.jsonl`
+los incluye. `estado.json` guarda en `mutacionesIntentadas` cuantas variantes genero cada mutacion.
+
+### `--probar-g`
+
+`diff <funcion> --probar-g` y `permutar <funcion> --probar-g` compilan el archivo de la funcion con `-G0` y
+con `-G8` y muestran las dos cifras antes de continuar. No escriben el archivo de opciones de compilacion ni
+el resultado que contrasta `progreso`: cambiar `g` lo decide una persona.
 
 ## Construccion
 

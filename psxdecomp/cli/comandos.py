@@ -295,12 +295,56 @@ def resumir_comparacion(resultado: comparacion.ResultadoDiff) -> list[str]:
     return [*lineas, nota, f"{veredicto} (coincide en bytes)"]
 
 
+def _mostrar_probar_g(
+    contexto: Contexto, herramientas: compilacion.HerramientasCompilacion, script: Path
+) -> None:
+    """
+    Imprime las cifras de la funcion compilada con ``-G0`` y con ``-G8`` (paso previo ``--probar-g``).
+
+    Contexto:
+        Lo comparten ``diff`` y ``permutar``. No escribe el archivo de opciones de compilacion ni el
+        resultado que ``progreso`` contrasta: el cambio de ``g`` lo decide una persona.
+
+    Args:
+        contexto (Contexto): Contexto de la orden; ``args.funcion`` es la funcion.
+        herramientas (compilacion.HerramientasCompilacion): Herramientas de compilacion ya resueltas.
+        script (Path): Ruta de ``diff.py`` de ``asm-differ``.
+
+    Raises:
+        ValueError: Si un umbral supera el tope de ``max_valor_g`` o la funcion no es valida.
+        ProcesoError: Si una herramienta falla.
+
+    Ejemplo:
+        _mostrar_probar_g(contexto, herramientas, script)
+    """
+    proyecto = contexto.proyecto
+    funcion = contexto.args.funcion
+    resultados = comparacion.comparar_con_valores_g(
+        contexto.raiz,
+        funcion,
+        herramientas,
+        script,
+        contexto.ejecutar,
+        rutas=proyecto.rutas,
+        convenciones=proyecto.convenciones,
+        compilacion=proyecto.compilacion,
+        nombre_ejecutable=proyecto.identidad.ejecutable,
+    )
+    archivo = resultados[0][1].archivo
+    declarado = infraestructura.leer_valores_g(
+        contexto.raiz, rutas=proyecto.rutas, convenciones=proyecto.convenciones
+    ).get(Path(archivo).stem, 0)
+    print("\n".join(comparacion.formatear_probar_g(resultados, declarado)))
+
+
 def ejecutar_diff(contexto: Contexto) -> int:
     """
     Implementa ``diff``: compara una funcion compilada desde C con su original.
 
     Contexto:
-        Imprime las columnas de ``asm-differ`` y el resumen de ``resumir_comparacion``.
+        Imprime las columnas de ``asm-differ`` y el resumen de ``resumir_comparacion``. Con ``--json``
+        imprime en su lugar un objeto JSON con la puntuacion y los tres ejes de la puntuacion secundaria;
+        con ``--probar-g`` muestra antes las cifras con ``-G0`` y ``-G8``.
 
     Args:
         contexto (Contexto): Contexto de la orden; ``args.funcion`` es la funcion a comparar.
@@ -323,6 +367,8 @@ def ejecutar_diff(contexto: Contexto) -> int:
         lock, rutas_toolchain.toolchain, contexto.python
     )
     script = resolver_herramienta(lock, rutas_toolchain.toolchain, "asm-differ", "diff")
+    if getattr(contexto.args, "probar_g", False):
+        _mostrar_probar_g(contexto, herramientas, script)
     resultado = comparacion.comparar_funcion(
         contexto.raiz,
         contexto.args.funcion,
@@ -334,6 +380,9 @@ def ejecutar_diff(contexto: Contexto) -> int:
         compilacion=proyecto.compilacion,
         nombre_ejecutable=proyecto.identidad.ejecutable,
     )
+    if getattr(contexto.args, "json", False):
+        print(comparacion.resultado_a_json(resultado))
+        return 0 if resultado.coincide else 1
     print(resultado.texto)
     print("\n".join(resumir_comparacion(resultado)))
     return 0 if resultado.coincide else 1
@@ -410,6 +459,8 @@ def ejecutar_permutar(contexto: Contexto) -> int:
         lock, rutas_toolchain.toolchain, contexto.python
     )
     script = resolver_herramienta(lock, rutas_toolchain.toolchain, "asm-differ", "diff")
+    if getattr(args, "probar_g", False):
+        _mostrar_probar_g(contexto, herramientas, script)
     opciones = busqueda.Opciones(
         iteraciones=args.iteraciones,
         minutos=args.minutos,

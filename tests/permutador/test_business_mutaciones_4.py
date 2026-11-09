@@ -62,7 +62,9 @@ def test_una_local_no_cruza_una_llamada_que_la_lee_o_la_escribe() -> None:
 
 
 def test_una_local_que_lee_el_resultado_de_la_llamada_no_la_cruza() -> None:
-    sin_cambio(mut.mover_sentencia_a_distancia, cuerpo("s32 x;", "s32 y;", "y = g(a);", "h(y);", "x = y + 1;"))
+    sin_cambio(
+        mut.mover_sentencia_a_distancia, cuerpo("s32 x;", "s32 y;", "y = g(a);", "h(y);", "x = y + 1;")
+    )
 
 
 def test_una_variable_con_direccion_tomada_no_se_mueve() -> None:
@@ -72,7 +74,10 @@ def test_una_variable_con_direccion_tomada_no_se_mueve() -> None:
 
 def test_no_se_cruza_una_etiqueta_un_salto_ni_un_return() -> None:
     sin_cambio(mut.mover_sentencia_a_distancia, cuerpo("D_global = 1;", "goto fin;", "D_otra = 2;", "fin:"))
-    sin_cambio(mut.mover_sentencia_a_distancia, cuerpo("D_global = 1;", "if (a) {", "    return;", "}", "D_otra = 2;"))
+    sin_cambio(
+        mut.mover_sentencia_a_distancia,
+        cuerpo("D_global = 1;", "if (a) {", "    return;", "}", "D_otra = 2;"),
+    )
     sin_cambio(mut.mover_sentencia_a_distancia, cuerpo("D_global = 1;", "fin:", "D_otra = 2;"))
 
 
@@ -81,15 +86,24 @@ def test_no_se_cruza_un_bucle_que_nunca_termina() -> None:
     variantes = todas_las_variantes(mut.mover_sentencia_a_distancia, texto)
     assert all(v.index("D_global = 1;") < v.index("while (1)") for v in variantes)
     texto = cuerpo("D_global = 1;", "for (;;) {", "    q->valor = a;", "}", "D_otra = 2;")
-    assert all(v.index("D_global = 1;") < v.index("for (;;)") for v in todas_las_variantes(mut.mover_sentencia_a_distancia, texto))
+    assert all(
+        v.index("D_global = 1;") < v.index("for (;;)")
+        for v in todas_las_variantes(mut.mover_sentencia_a_distancia, texto)
+    )
     texto = cuerpo("D_global = 1;", "do {", "    q->valor = a;", "} while (1);", "D_otra = 2;")
-    assert all(v.index("D_global = 1;") < v.index("do {") for v in todas_las_variantes(mut.mover_sentencia_a_distancia, texto))
+    assert all(
+        v.index("D_global = 1;") < v.index("do {")
+        for v in todas_las_variantes(mut.mover_sentencia_a_distancia, texto)
+    )
 
 
 def test_se_cruza_un_bucle_que_termina_si_es_independiente() -> None:
     texto = cuerpo("D_global = 1;", "while (b) {", "    q->valor = a;", "    b--;", "}", "p->clave = 2;")
     variantes = todas_las_variantes(mut.mover_sentencia_a_distancia, texto)
-    assert cuerpo("while (b) {", "    q->valor = a;", "    b--;", "}", "p->clave = 2;", "D_global = 1;") in variantes
+    assert (
+        cuerpo("while (b) {", "    q->valor = a;", "    b--;", "}", "p->clave = 2;", "D_global = 1;")
+        in variantes
+    )
 
 
 def test_una_declaracion_con_inicial_se_mueve_entera_dentro_de_la_serie() -> None:
@@ -165,8 +179,10 @@ def test_se_envuelve_todo_el_bloque_aunque_no_tenga_llamadas() -> None:
 
 def test_no_se_envuelve_un_rango_sin_llamada_que_no_abarca_el_bloque() -> None:
     texto = cuerpo("D_global = a;", "D_otra = b;", "p->valor = 1;")
-    assert all(v.count("do {") == 1 and "do {\n        D_global = a;\n        D_otra = b;\n        p->valor" in v
-               for v in todas_las_variantes(mut.envolver_en_bloque, texto))
+    assert all(
+        v.count("do {") == 1 and "do {\n        D_global = a;\n        D_otra = b;\n        p->valor" in v
+        for v in todas_las_variantes(mut.envolver_en_bloque, texto)
+    )
 
 
 def test_no_se_envuelve_una_sentencia_vacia_ni_codigo_nuevo() -> None:
@@ -179,7 +195,9 @@ def test_no_se_envuelve_una_sentencia_vacia_ni_codigo_nuevo() -> None:
 
 def test_no_se_envuelve_un_rango_con_break_continue_saltos_o_etiquetas() -> None:
     sin_cambio(mut.envolver_en_bloque, cuerpo("while (a) {", "    break;", "}"))
-    for variante in todas_las_variantes(mut.envolver_en_bloque, cuerpo("while (a) {", "    g(a);", "    continue;", "}")):
+    for variante in todas_las_variantes(
+        mut.envolver_en_bloque, cuerpo("while (a) {", "    g(a);", "    continue;", "}")
+    ):
         assert variante.index("} while (0);") < variante.index("continue;")
     sin_cambio(mut.envolver_en_bloque, cuerpo("goto fin;", "fin:"))
     for variante in todas_las_variantes(
@@ -211,7 +229,16 @@ def test_el_rango_envuelto_tiene_un_tope_de_sentencias() -> None:
 
 def test_contar_envolturas_cuenta_las_anidadas() -> None:
     funcion = c.analizar_funcion(
-        cuerpo("do {", "    do {", "        g(a);", "    } while (0);", "} while (0);", "do {", "    g(b);", "} while (a);"),
+        cuerpo(
+            "do {",
+            "    do {",
+            "        g(a);",
+            "    } while (0);",
+            "} while (0);",
+            "do {",
+            "    g(b);",
+            "} while (a);",
+        ),
         "f",
         frozenset({"Nodo", "Mundo"}),
     )
@@ -219,7 +246,9 @@ def test_contar_envolturas_cuenta_las_anidadas() -> None:
 
 
 def test_una_condicion_cero_con_otro_literal_no_es_una_envoltura() -> None:
-    funcion = c.analizar_funcion(cuerpo("do {", "    g(a);", "} while (1);"), "f", frozenset({"Nodo", "Mundo"}))
+    funcion = c.analizar_funcion(
+        cuerpo("do {", "    g(a);", "} while (1);"), "f", frozenset({"Nodo", "Mundo"})
+    )
     assert mut.contar_envolturas(funcion) == 0
 
 
@@ -255,7 +284,9 @@ def test_la_primera_asignacion_conserva_el_valor_inicial_de_la_declaracion() -> 
 
 
 def test_los_usos_anidados_entre_asignaciones_se_renombran() -> None:
-    texto = cuerpo("s32 u;", "u = a;", "if (b) {", "    D_global = u;", "}", "u = b;", "while (u) {", "    u--;", "}")
+    texto = cuerpo(
+        "s32 u;", "u = a;", "if (b) {", "    D_global = u;", "}", "u = b;", "while (u) {", "    u--;", "}"
+    )
     sin_cambio(mut.dividir_local_multiset, texto)
     texto = cuerpo("s32 u;", "u = a;", "if (b) {", "    D_global = u;", "}", "u = b;", "D_otra = u;")
     _, resultado = aplicar(mut.dividir_local_multiset, texto)
@@ -263,7 +294,9 @@ def test_los_usos_anidados_entre_asignaciones_se_renombran() -> None:
 
 
 def test_no_se_divide_una_local_escrita_dentro_de_una_rama_o_con_otro_operador() -> None:
-    sin_cambio(mut.dividir_local_multiset, cuerpo("s32 u;", "u = a;", "if (b) {", "    u = 1;", "}", "u = 2;"))
+    sin_cambio(
+        mut.dividir_local_multiset, cuerpo("s32 u;", "u = a;", "if (b) {", "    u = 1;", "}", "u = 2;")
+    )
     sin_cambio(mut.dividir_local_multiset, cuerpo("s32 u;", "u = a;", "u += 1;", "u = b;"))
     sin_cambio(mut.dividir_local_multiset, cuerpo("s32 u;", "u = a;", "u++;", "u = b;"))
 
@@ -326,7 +359,9 @@ def test_no_se_expande_si_el_valor_tiene_efectos_o_el_tipo_lo_cambia() -> None:
 
 
 def test_no_se_expande_si_el_uso_esta_en_la_condicion_de_un_bucle_o_en_otra_rama() -> None:
-    sin_cambio(mut.expandir_local, cuerpo("s32 x;", "x = a;", "D_global = 1;", "while (b < x) {", "    b++;", "}"))
+    sin_cambio(
+        mut.expandir_local, cuerpo("s32 x;", "x = a;", "D_global = 1;", "while (b < x) {", "    b++;", "}")
+    )
     sin_cambio(mut.expandir_local, cuerpo("s32 x;", "x = a;", "if (b) {", "    D_otra = x;", "}"))
 
 
@@ -335,13 +370,19 @@ def test_no_se_expande_si_hay_una_etiqueta_entre_la_asignacion_y_el_uso() -> Non
 
 
 def test_no_se_expande_un_uso_perezoso_ni_uno_con_otras_asignaciones_en_la_sentencia() -> None:
-    sin_cambio(mut.expandir_local, cuerpo("s32 x;", "x = a;", "D_global = 1;", "if (b && x) {", "    D_otra = 1;", "}"))
+    sin_cambio(
+        mut.expandir_local,
+        cuerpo("s32 x;", "x = a;", "D_global = 1;", "if (b && x) {", "    D_otra = 1;", "}"),
+    )
     sin_cambio(mut.expandir_local, cuerpo("s32 x;", "x = a;", "D_global = 1;", "D_otra = (b = 2) + x;"))
     sin_cambio(mut.expandir_local, cuerpo("s32 x;", "x = a;", "D_global = 1;", "D_otra = x + b++;"))
 
 
 def test_un_uso_en_la_condicion_de_un_if_o_en_un_return_se_expande() -> None:
-    _, resultado = aplicar(mut.expandir_local, cuerpo("s32 x;", "x = a + 1;", "D_global = 1;", "if (x) {", "    D_otra = 1;", "}"))
+    _, resultado = aplicar(
+        mut.expandir_local,
+        cuerpo("s32 x;", "x = a + 1;", "D_global = 1;", "if (x) {", "    D_otra = 1;", "}"),
+    )
     assert "if (a + 1) {" in resultado
 
 
@@ -394,7 +435,9 @@ def test_dos_globales_se_encadenan_si_el_valor_no_lee_memoria() -> None:
 
 
 def test_no_se_encadena_una_variable_con_la_direccion_tomada() -> None:
-    sin_cambio(mut.cadena_de_asignacion, cuerpo("s32 x;", "s32 y;", "g(&x);", "x = p->valor;", "y = p->valor;"))
+    sin_cambio(
+        mut.cadena_de_asignacion, cuerpo("s32 x;", "s32 y;", "g(&x);", "x = p->valor;", "y = p->valor;")
+    )
 
 
 # --- dividir_asignacion --------------------------------------------------------------------------------
@@ -463,7 +506,9 @@ def test_un_puntero_se_parte_con_aritmetica_de_direccion() -> None:
 
 def test_menor_que_pasa_a_menor_o_igual_con_la_constante_menos_uno() -> None:
     texto = cuerpo("if (a < 10) {", "    D_global = 1;", "}")
-    assert cuerpo("if (a <= 9) {", "    D_global = 1;", "}") in todas_las_variantes(mut.ajustar_desigualdad, texto)
+    assert cuerpo("if (a <= 9) {", "    D_global = 1;", "}") in todas_las_variantes(
+        mut.ajustar_desigualdad, texto
+    )
 
 
 def test_mayor_que_pasa_a_mayor_o_igual_con_la_constante_mas_uno() -> None:
@@ -477,14 +522,20 @@ def test_las_formas_con_igual_vuelven_a_la_desigualdad_estricta() -> None:
         mut.ajustar_desigualdad, texto
     )
     texto = cuerpo("if (a >= 3) {", "    D_global = 1;", "}")
-    assert cuerpo("if (a > 2) {", "    D_global = 1;", "}") in todas_las_variantes(mut.ajustar_desigualdad, texto)
+    assert cuerpo("if (a > 2) {", "    D_global = 1;", "}") in todas_las_variantes(
+        mut.ajustar_desigualdad, texto
+    )
 
 
 def test_una_constante_negativa_se_escribe_con_signo() -> None:
     texto = cuerpo("if (a > -3) {", "    D_global = 1;", "}")
-    assert cuerpo("if (a >= -2) {", "    D_global = 1;", "}") in todas_las_variantes(mut.ajustar_desigualdad, texto)
+    assert cuerpo("if (a >= -2) {", "    D_global = 1;", "}") in todas_las_variantes(
+        mut.ajustar_desigualdad, texto
+    )
     texto = cuerpo("if (a >= 0) {", "    D_global = 1;", "}")
-    assert cuerpo("if (a > -1) {", "    D_global = 1;", "}") in todas_las_variantes(mut.ajustar_desigualdad, texto)
+    assert cuerpo("if (a > -1) {", "    D_global = 1;", "}") in todas_las_variantes(
+        mut.ajustar_desigualdad, texto
+    )
 
 
 def test_un_valor_sin_signo_no_pasa_a_una_constante_negativa() -> None:
@@ -530,8 +581,15 @@ def test_un_acceso_con_indice_toma_las_otras_tres_formas() -> None:
 def test_cada_forma_se_reconoce_y_pasa_a_las_demas() -> None:
     for entrada in ("(p + a)->valor", "(&p[a])->valor", "(*(p + a)).valor", "p[a].valor"):
         variantes = todas_las_variantes(mut.forma_de_acceso_a_struct, cuerpo(f"D_global = {entrada};"))
-        esperadas = {f"D_global = {f};" for f in ("(p + a)->valor", "(&p[a])->valor", "(*(p + a)).valor", "p[a].valor")}
-        obtenidas = {linea.strip() for v in variantes for linea in v.splitlines() if linea.strip().startswith("D_global")}
+        esperadas = {
+            f"D_global = {f};" for f in ("(p + a)->valor", "(&p[a])->valor", "(*(p + a)).valor", "p[a].valor")
+        }
+        obtenidas = {
+            linea.strip()
+            for v in variantes
+            for linea in v.splitlines()
+            if linea.strip().startswith("D_global")
+        }
         assert obtenidas == esperadas - {f"D_global = {entrada};"}
 
 
@@ -626,12 +684,18 @@ def test_una_local_inicializada_con_la_llamada_tambien_pasa_a_16_bits() -> None:
 def test_no_se_estrecha_si_alguna_lectura_usa_el_valor_completo() -> None:
     sin_cambio(mut.ancho_de_variable_de_retorno, cuerpo("s32 r;", "r = g(a);", "D_global = r;"))
     sin_cambio(mut.ancho_de_variable_de_retorno, cuerpo("s32 r;", "r = g(a);", "p->corto = (s32)r;"))
-    sin_cambio(mut.ancho_de_variable_de_retorno, cuerpo("s32 r;", "r = g(a);", "if (r == 3) {", "    h(a);", "}"))
+    sin_cambio(
+        mut.ancho_de_variable_de_retorno, cuerpo("s32 r;", "r = g(a);", "if (r == 3) {", "    h(a);", "}")
+    )
 
 
 def test_no_se_estrecha_si_recibe_algo_que_no_es_una_llamada() -> None:
-    sin_cambio(mut.ancho_de_variable_de_retorno, cuerpo("s32 r;", "r = g(a);", "r = b;", "p->corto = (s16)r;"))
-    sin_cambio(mut.ancho_de_variable_de_retorno, cuerpo("s32 r;", "r = g(a);", "r += 1;", "p->corto = (s16)r;"))
+    sin_cambio(
+        mut.ancho_de_variable_de_retorno, cuerpo("s32 r;", "r = g(a);", "r = b;", "p->corto = (s16)r;")
+    )
+    sin_cambio(
+        mut.ancho_de_variable_de_retorno, cuerpo("s32 r;", "r = g(a);", "r += 1;", "p->corto = (s16)r;")
+    )
     sin_cambio(mut.ancho_de_variable_de_retorno, cuerpo("s32 r;", "p->corto = (s16)r;"))
 
 
@@ -658,8 +722,13 @@ def test_el_limite_puede_ser_un_campo_y_estar_a_cualquier_lado_de_la_comparacion
 
 
 def test_no_se_lee_antes_si_el_avance_escribe_el_limite() -> None:
-    sin_cambio(mut.limite_en_local_antes_del_incremento, cuerpo("do {", "    m->escala += 1;", "} while (a < m->escala);"))
-    sin_cambio(mut.limite_en_local_antes_del_incremento, cuerpo("do {", "    a += 2;", "} while (a < a + D_otra);"))
+    sin_cambio(
+        mut.limite_en_local_antes_del_incremento,
+        cuerpo("do {", "    m->escala += 1;", "} while (a < m->escala);"),
+    )
+    sin_cambio(
+        mut.limite_en_local_antes_del_incremento, cuerpo("do {", "    a += 2;", "} while (a < a + D_otra);")
+    )
 
 
 def test_no_se_lee_antes_si_hay_continue_o_el_avance_no_es_lo_ultimo() -> None:
@@ -682,18 +751,31 @@ def test_no_se_lee_antes_si_el_limite_es_una_local_o_una_constante() -> None:
 
 
 def test_no_se_lee_antes_si_el_otro_lado_no_usa_la_variable_avanzada() -> None:
-    sin_cambio(mut.limite_en_local_antes_del_incremento, cuerpo("do {", "    a += 2;", "} while (b < D_otra);"))
+    sin_cambio(
+        mut.limite_en_local_antes_del_incremento, cuerpo("do {", "    a += 2;", "} while (b < D_otra);")
+    )
 
 
 def test_no_se_lee_antes_un_limite_de_tipo_desconocido() -> None:
-    sin_cambio(mut.limite_en_local_antes_del_incremento, cuerpo("do {", "    a += 2;", "} while (a < desconocido->x);"))
+    sin_cambio(
+        mut.limite_en_local_antes_del_incremento,
+        cuerpo("do {", "    a += 2;", "} while (a < desconocido->x);"),
+    )
 
 
 # --- copia_local_por_rama ------------------------------------------------------------------------------
 
 
 def test_un_puntero_leido_en_una_rama_se_copia_al_principio() -> None:
-    texto = cuerpo("q->valor = 1;", "if (a) {", "    p->valor = 2;", "} else {", "    D_global = 5;", "}", "p->corto = 4;")
+    texto = cuerpo(
+        "q->valor = 1;",
+        "if (a) {",
+        "    p->valor = 2;",
+        "} else {",
+        "    D_global = 5;",
+        "}",
+        "p->corto = 4;",
+    )
     variantes = todas_las_variantes(mut.copia_local_por_rama, texto)
     assert (
         cuerpo(
@@ -737,7 +819,9 @@ def test_no_se_copia_un_puntero_escrito_en_la_rama_o_en_la_condicion() -> None:
         mut.copia_local_por_rama,
         cuerpo("if (a) {", "    p->valor = 2;", "    p = q;", "}", "p->corto = 4;"),
     )
-    sin_cambio(mut.copia_local_por_rama, cuerpo("if ((p = q) != 0) {", "    p->valor = 2;", "}", "p->corto = 4;"))
+    sin_cambio(
+        mut.copia_local_por_rama, cuerpo("if ((p = q) != 0) {", "    p->valor = 2;", "}", "p->corto = 4;")
+    )
 
 
 def test_no_se_copia_un_puntero_usado_solo_en_la_rama_ni_un_entero() -> None:
@@ -760,7 +844,9 @@ def test_no_se_copia_un_puntero_con_la_direccion_tomada() -> None:
 
 
 def test_la_copia_cubre_un_if_dentro_de_un_bucle() -> None:
-    texto = cuerpo("while (a) {", "    if (b) {", "        p->valor = 2;", "    }", "    p->corto = 4;", "    a--;", "}")
+    texto = cuerpo(
+        "while (a) {", "    if (b) {", "        p->valor = 2;", "    }", "    p->corto = 4;", "    a--;", "}"
+    )
     _, resultado = aplicar(mut.copia_local_por_rama, texto)
     assert "tmp1 = p;" in resultado and "tmp1->valor = 2;" in resultado
 

@@ -87,6 +87,16 @@ def construir_parser(
     ).set_defaults(manejador=comandos.ejecutar_clean)
     comparar = sub.add_parser("diff", help="compara una funcion compilada desde C con su original")
     comparar.add_argument("funcion", help="nombre de la funcion")
+    comparar.add_argument(
+        "--json",
+        action="store_true",
+        help="imprime la puntuacion y sus tres ejes (operandos, reordenacion, insercion o borrado) como JSON",
+    )
+    comparar.add_argument(
+        "--probar-g",
+        action="store_true",
+        help="antes de comparar, muestra la cifra con -G0 y con -G8 (no escribe nada)",
+    )
     comparar.set_defaults(manejador=comandos.ejecutar_diff)
     ensayar = sub.add_parser(
         "probar", help="compara con el original cada variante .c de una carpeta y ordena por puntuacion"
@@ -112,6 +122,11 @@ def construir_parser(
         "--reanudar",
         action="store_true",
         help=f"continua la busqueda guardada en {rutas.build}/permutar/<funcion>/",
+    )
+    buscar.add_argument(
+        "--probar-g",
+        action="store_true",
+        help="antes de buscar, muestra la cifra con -G0 y con -G8 (no escribe nada)",
     )
     buscar.set_defaults(manejador=comandos.ejecutar_permutar)
     sub.add_parser(

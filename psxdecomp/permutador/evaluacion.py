@@ -34,6 +34,7 @@ from psxdecomp.diff.comparacion import (
     salida_truncada,
     validar_funcion,
 )
+from psxdecomp.diff.ejes import EjesPuntuacion, ejes_desde_json
 from psxdecomp.diff.enlace_diff import TIMEOUT_ENLACE_S, bytes_coinciden, funcion_en_objeto
 from psxdecomp.diff.fuentes_c import EstadoFuncion
 from psxdecomp.dominio import Compilacion, Convenciones, Rutas
@@ -50,11 +51,14 @@ class ResultadoEvaluacion:
         puntuacion: Puntuacion como la informa ``diff`` (0 si coincide); ``None`` si se descarto.
         motivo: Por que se descarto (una linea), o ``None`` si se midio.
         coincide: Si las instrucciones o los bytes enlazados coinciden con el original.
+        ejes: Puntuacion secundaria en tres ejes (no cambia la funcion objetivo), o ``None`` si no
+            se pudo calcular o la variante se descarto.
     """
 
     puntuacion: int | None
     motivo: str | None = None
     coincide: bool = False
+    ejes: EjesPuntuacion | None = None
 
 
 @dataclass(frozen=True)
@@ -298,12 +302,28 @@ def _evaluar_en(
     puntuacion = puntuacion_desde_json(salida)
     if salida_truncada(salida, objetivo.max_lineas):
         return ResultadoEvaluacion(None, "medicion truncada: la variante supera el limite de lineas")
+    iguales = _coinciden_los_bytes(objetivo, puntuacion, comprobar_bytes_bajo, candidato, copia)
+    if iguales is None:
+        return ResultadoEvaluacion(None, "la variante no enlaza en la direccion de la funcion")
+    if iguales:
+        return ResultadoEvaluacion(0, coincide=True, ejes=EjesPuntuacion())
+    return ResultadoEvaluacion(puntuacion, ejes=ejes_desde_json(salida))
+
+
+def _coinciden_los_bytes(
+    objetivo: ObjetivoMedicion, puntuacion: int, comprobar_bytes_bajo: int, candidato: str, copia: str
+) -> bool | None:
+    """
+    Decide si la variante coincide: puntuacion cero, o bytes enlazados iguales si la cifra es baja.
+
+    Devuelve ``None`` si hace falta enlazar y la variante no enlaza en la direccion de la funcion.
+    """
     if puntuacion == 0:
-        return ResultadoEvaluacion(0, coincide=True)
+        return True
     if puntuacion >= comprobar_bytes_bajo or objetivo.direccion is None:
-        return ResultadoEvaluacion(puntuacion)
-    iguales = bytes_coinciden(
-        raiz,
+        return False
+    return bytes_coinciden(
+        objetivo.raiz,
         objetivo.herramientas,
         objetivo.ejecutar,
         funcion=objetivo.funcion,
@@ -312,6 +332,3 @@ def _evaluar_en(
         objetivo=copia,
         elf=objetivo.elf,
     )
-    if iguales is None:
-        return ResultadoEvaluacion(None, "la variante no enlaza en la direccion de la funcion")
-    return ResultadoEvaluacion(0, coincide=True) if iguales else ResultadoEvaluacion(puntuacion)

@@ -86,6 +86,7 @@ class Resumen:
         segundos: Duracion de esta sesion.
         descartadas: Variantes descartadas por motivo.
         interrumpida: Si la busqueda se interrumpio con Ctrl+C.
+        envolturas: Envolturas ``do { } while (0)`` que el candidato anade al C original.
     """
 
     funcion: str
@@ -98,6 +99,7 @@ class Resumen:
     segundos: float
     descartadas: Counter[str] = field(default_factory=Counter)
     interrumpida: bool = False
+    envolturas: int = 0
 
     @property
     def codigo_de_salida(self) -> int:
@@ -207,6 +209,7 @@ class Busqueda:
             reloj (Callable[[], float]): Reloj monotono en segundos.
         """
         self.base = base
+        self.envolturas_base = mut.contar_envolturas(base)
         self.texto_base = c.imprimir_funcion(base)
         self.tabla = tabla
         self.evaluador = evaluador
@@ -281,14 +284,40 @@ class Busqueda:
         for variante, resultado in zip(pendientes, medidas, strict=True):
             variante.resultado = resultado
 
+    def _envolturas_nuevas(self, arbol: c.Funcion) -> int:
+        """Envolturas ``do { } while (0)`` que un arbol anade a las del C de partida."""
+        return max(0, mut.contar_envolturas(arbol) - self.envolturas_base)
+
     def _registrar_mejora(self, variante: _Variante, puntuacion: int, posicion: int) -> None:
-        """Guarda una variante que mejora el mejor resultado."""
+        """
+        Guarda una variante que mejora el mejor resultado.
+
+        El estado, el registro y ``mejor.c`` declaran las envolturas de la variante: un candidato que las
+        contiene debe justificarse con el volcado del compilador antes de aplicarse.
+        """
+        envolturas = self._envolturas_nuevas(variante.arbol)
+        ejes = variante.resultado.ejes if variante.resultado else None
         self.estado.puntuacion_mejor = puntuacion
+        self.estado.envolturas = envolturas
         self.arbol_mejor = variante.arbol
-        est.guardar_mejor(self.carpeta, variante.texto, puntuacion, self.estado.puntuacion_partida)
+        est.guardar_mejor(
+            self.carpeta, variante.texto, puntuacion, self.estado.puntuacion_partida, envolturas
+        )
         iteracion = self.estado.iteraciones + posicion
-        est.anadir_registro(self.carpeta, iteracion, puntuacion, variante.mutaciones)
-        self.salida(f"iteracion {iteracion}: puntuacion {puntuacion} ({', '.join(variante.mutaciones)})")
+        est.anadir_registro(
+            self.carpeta, iteracion, puntuacion, variante.mutaciones, envolturas=envolturas, ejes=ejes
+        )
+        marca = f" [{envolturas} envolturas: justificar con el volcado]" if envolturas else ""
+        self.salida(
+            f"iteracion {iteracion}: puntuacion {puntuacion} ({', '.join(variante.mutaciones)}){marca}"
+        )
+
+    def _contar_intentos(self, variante: _Variante) -> None:
+        """Suma al estado una variante generada por cada mutacion que la produjo."""
+        intentadas = self.estado.mutaciones_intentadas
+        for descripcion in variante.mutaciones:
+            nombre = descripcion.split("(", 1)[0]
+            intentadas[nombre] = intentadas.get(nombre, 0) + 1
 
     def _avanzar(self, variantes: list[_Variante], azar: random.Random) -> bool:
         """
@@ -353,6 +382,8 @@ class Busqueda:
         tamano = self._tamano_de_ronda()
         generadas = [self._generar(i) for i in range(tamano)]
         variantes = [v for v in generadas if v is not None]
+        for variante in variantes:
+            self._contar_intentos(variante)
         self.iteraciones_sesion += tamano
         self.rondas_vacias = self.rondas_vacias + 1 if not variantes else 0
         self._medir(variantes, pool)
@@ -400,6 +431,7 @@ class Busqueda:
             segundos=self.reloj() - inicio,
             descartadas=self.descartadas,
             interrumpida=interrumpida,
+            envolturas=self.estado.envolturas,
         )
 
 
@@ -436,6 +468,11 @@ def formatear_resumen(resumen: Resumen, raiz: Path) -> str:
         f"candidato: {resumen.candidato.relative_to(raiz).as_posix()}",
         f"descartadas: {descartadas or 'ninguna'}",
     ]
+    if resumen.envolturas:
+        lineas.append(
+            f"aviso: el candidato contiene {resumen.envolturas} envolturas do {{ }} while (0) sin codigo: "
+            "justifiquelas con el volcado del compilador antes de aplicarlo"
+        )
     if resumen.interrumpida:
         lineas.append("busqueda interrumpida: reanude con --reanudar")
     return "\n".join(lineas)
@@ -583,8 +620,7 @@ def _reanudar(
     """Reconstruye una busqueda guardada."""
     estado = est.cargar_estado(carpeta, funcion)
     actual = c.analizar_funcion(est.cargar_actual(carpeta), funcion, tabla.nombres_de_tipo)
-    mejor_texto = (carpeta / "mejor.c").read_text(encoding="utf-8").split("\n", 1)[1].rstrip("\n")
-    mejor = c.analizar_funcion(mejor_texto, funcion, tabla.nombres_de_tipo)
+    mejor = c.analizar_funcion(est.cargar_mejor(carpeta), funcion, tabla.nombres_de_tipo)
     busqueda = Busqueda(
         base, tabla, evaluador, estado=estado, carpeta=carpeta, opciones=opciones, salida=salida, reloj=reloj
     )
@@ -603,4 +639,5 @@ def _resumen_cerrado(busqueda: Busqueda, opciones: Opciones) -> Resumen:
         puntuacion_mejor=0,
         candidato=busqueda.carpeta / "mejor.c",
         segundos=0.0,
+        envolturas=busqueda.estado.envolturas,
     )

@@ -17,9 +17,10 @@ import json
 import os
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
+from psxdecomp.diff.ejes import EjesPuntuacion
 from psxdecomp.dominio import RUTAS_SENCILLAS_POR_DEFECTO
 
 VERSION_ESTADO = 1
@@ -45,6 +46,9 @@ class Estado:
         puntuacion_mejor: Puntuacion de ``mejor.c``.
         rondas_sin_mejora: Rondas seguidas sin mejorar ``actual.c``.
         segundos: Tiempo acumulado en todas las sesiones.
+        envolturas: Envolturas ``do { } while (0)`` que ``mejor.c`` anade respecto al C de partida: un
+            candidato con envolturas debe justificarse con el volcado del compilador antes de aplicarse.
+        mutaciones_intentadas: Variantes generadas por nombre de mutacion, acumuladas entre sesiones.
     """
 
     funcion: str
@@ -57,6 +61,8 @@ class Estado:
     iteraciones: int = 0
     rondas_sin_mejora: int = 0
     segundos: float = 0.0
+    envolturas: int = 0
+    mutaciones_intentadas: dict[str, int] = field(default_factory=dict)
 
 
 def carpeta_de(raiz: Path, funcion: str, build: str = BUILD_POR_DEFECTO) -> Path:
@@ -167,6 +173,8 @@ def guardar_estado(carpeta: Path, estado: Estado) -> None:
         "iteraciones": estado.iteraciones,
         "rondasSinMejora": estado.rondas_sin_mejora,
         "segundos": round(estado.segundos, 3),
+        "envolturas": estado.envolturas,
+        "mutacionesIntentadas": dict(sorted(estado.mutaciones_intentadas.items())),
     }
     _escribir_atomico(carpeta / "estado.json", json.dumps(datos, indent=2) + "\n")
 
@@ -234,7 +242,26 @@ def cargar_estado(carpeta: Path, funcion: str) -> Estado:
         iteraciones=_entero(datos, "iteraciones"),
         rondas_sin_mejora=_entero(datos, "rondasSinMejora"),
         segundos=float(segundos),
+        envolturas=_entero({"envolturas": datos.get("envolturas", 0)}, "envolturas"),
+        mutaciones_intentadas=_contadores(datos.get("mutacionesIntentadas", {})),
     )
+
+
+def _contadores(valor: object) -> dict[str, int]:
+    """Lee los contadores por mutacion: un objeto de nombres de texto y enteros no negativos."""
+    if not isinstance(valor, dict):
+        raise ValueError("estado.json: 'mutacionesIntentadas' debe ser un objeto")
+    contadores: dict[str, int] = {}
+    for nombre, cantidad in valor.items():
+        if (
+            not isinstance(nombre, str)
+            or isinstance(cantidad, bool)
+            or not isinstance(cantidad, int)
+            or cantidad < 0
+        ):
+            raise ValueError("estado.json: 'mutacionesIntentadas' debe mapear nombres a enteros no negativos")
+        contadores[nombre] = cantidad
+    return contadores
 
 
 def guardar_actual(carpeta: Path, texto_funcion: str) -> None:
@@ -279,49 +306,121 @@ def cargar_actual(carpeta: Path) -> str:
     return ruta.read_text(encoding="utf-8").rstrip("\n")
 
 
-def guardar_mejor(carpeta: Path, texto_funcion: str, puntuacion: int, partida: int) -> Path:
+def marca_de_envolturas(envolturas: int) -> str:
+    """
+    Da la linea de comentario con que ``mejor.c`` declara que contiene envolturas.
+
+    Contexto:
+        Una envoltura ``do { } while (0)`` no genera codigo: solo es legitima si una persona la justifica
+        con el volcado del compilador. La marca es una sola linea, fija y comprobable (``mejor.c`` la
+        lleva si y solo si ``Estado.envolturas`` es mayor que cero).
+
+    Args:
+        envolturas (int): Cantidad de envolturas del candidato (mayor que cero).
+
+    Returns:
+        str: Comentario de una linea, sin salto de linea final.
+
+    Ejemplo:
+        linea = marca_de_envolturas(2)
+    """
+    return (
+        f"/* El candidato contiene {envolturas} envolturas do {{ }} while (0) sin codigo "
+        "que requieren justificacion con el volcado del compilador. */"
+    )
+
+
+def guardar_mejor(
+    carpeta: Path, texto_funcion: str, puntuacion: int, partida: int, envolturas: int = 0
+) -> Path:
     """
     Escribe ``mejor.c``: la mejor definicion con un comentario que declara su puntuacion.
 
     Contexto:
         Es el candidato que una persona aplica despues de leerlo; nunca se escribe en
-        ``src/``.
+        ``src/``. Si el candidato contiene envolturas, una segunda linea de comentario lo declara
+        (``marca_de_envolturas``) para que se justifique antes de aplicarlo.
 
     Args:
         carpeta (Path): Carpeta de estado.
         texto_funcion (str): Definicion de la mejor variante.
         puntuacion (int): Su puntuacion.
         partida (int): Puntuacion del C original.
+        envolturas (int, opcional): Envolturas que el candidato anade al C original.
 
     Returns:
         Path: Ruta de ``mejor.c``.
 
     Ejemplo:
-        ruta = guardar_mejor(carpeta, texto, 0, 10)
+        ruta = guardar_mejor(carpeta, texto, 0, 10, envolturas=1)
     """
     destino = carpeta / "mejor.c"
     cabecera = f"/* Candidato del permutador: puntuacion {puntuacion} (el C original puntua {partida}). */\n"
+    if envolturas > 0:
+        cabecera += marca_de_envolturas(envolturas) + "\n"
     _escribir_atomico(destino, cabecera + texto_funcion + "\n")
     return destino
 
 
-def anadir_registro(carpeta: Path, iteracion: int, puntuacion: int, mutaciones: list[str]) -> None:
+def cargar_mejor(carpeta: Path) -> str:
+    """
+    Lee la definicion de ``mejor.c`` sin sus lineas de comentario iniciales.
+
+    Contexto:
+        Lo usa ``--reanudar``. El archivo lleva una o dos lineas de comentario antes de la definicion
+        (la puntuacion y, con envolturas, su marca).
+
+    Args:
+        carpeta (Path): Carpeta de estado.
+
+    Returns:
+        str: Definicion de la funcion, sin salto de linea final.
+
+    Ejemplo:
+        texto = cargar_mejor(carpeta)
+    """
+    lineas = (carpeta / "mejor.c").read_text(encoding="utf-8").rstrip("\n").split("\n")
+    primera = next((i for i, linea in enumerate(lineas) if not linea.startswith("/* ")), len(lineas))
+    return "\n".join(lineas[primera:])
+
+
+def anadir_registro(
+    carpeta: Path,
+    iteracion: int,
+    puntuacion: int,
+    mutaciones: list[str],
+    *,
+    envolturas: int = 0,
+    ejes: EjesPuntuacion | None = None,
+) -> None:
     """
     Agrega una linea a ``registro.jsonl`` por cada mejora.
 
     Contexto:
-        Documenta que reformulaciones llevaron a cada mejora, para saber cuales funcionan.
+        Documenta que reformulaciones llevaron a cada mejora, para saber cuales funcionan. Cada linea
+        declara cuantas envolturas contiene la variante aceptada (``envolturas``, cero si ninguna) y la
+        puntuacion secundaria en tres ejes (``ejes``), que no interviene en la busqueda.
 
     Args:
         carpeta (Path): Carpeta de estado.
         iteracion (int): Numero de iteracion en que se hallo.
         puntuacion (int): Puntuacion lograda.
         mutaciones (list[str]): Mutaciones aplicadas a la variante respecto a la anterior.
+        envolturas (int, opcional): Envolturas que la variante anade al C original.
+        ejes (EjesPuntuacion | None, opcional): Ejes de la variante, si se pudieron calcular.
 
     Ejemplo:
         anadir_registro(carpeta, 41, 10, ["orden_sentencias(posiciones 3 y 4)"])
     """
     carpeta.mkdir(parents=True, exist_ok=True)
-    linea = json.dumps({"iteracion": iteracion, "puntuacion": puntuacion, "mutaciones": mutaciones})
+    datos: dict[str, object] = {
+        "iteracion": iteracion,
+        "puntuacion": puntuacion,
+        "mutaciones": mutaciones,
+        "envolturas": envolturas,
+    }
+    if ejes is not None:
+        datos["ejes"] = ejes.como_json()
+    linea = json.dumps(datos)
     with (carpeta / "registro.jsonl").open("a", encoding="utf-8", newline="\n") as salida:
         salida.write(linea + "\n")
