@@ -330,8 +330,9 @@ concentra la regla y los mensajes de error nombran las dos variables.
 ## Linea de ordenes
 
 `python -m psxdecomp.cli <orden>` es la entrada preferente del kit. La raiz del proyecto es `--proyecto <raiz>`
-o la carpeta actual. Ordenes comunes: `split`, `build`, `verify`, `clean`, `diff <funcion>`,
-`probar <funcion> <carpeta>`, `permutar <funcion>`, `verificar-config`, `progreso [--sin-readme]` y `comprobar [ruta]`. Los codigos de retorno
+o la carpeta actual. Ordenes comunes: `split`, `build`, `verify`, `clean`, `diff <funcion> [--json] [--probar-g]`,
+`probar <funcion> <carpeta>`, `permutar <funcion> [--probar-g]`, `verificar-config`, `progreso [--sin-readme]` y
+`comprobar [ruta]`. Los codigos de retorno
 son `0` (bien), `1` (error esperado o verificacion fallida; `permutar` tambien `1` si mejora sin cerrar) y `2`
 (uso incorrecto, o `permutar` sin mejora). Los errores esperados se imprimen en una linea, sin traza ni rutas de la
 maquina. La ayuda de cada orden nombra las rutas y los nombres de variable del manifiesto, nunca los de un juego.

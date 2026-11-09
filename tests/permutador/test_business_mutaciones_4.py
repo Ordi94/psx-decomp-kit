@@ -145,7 +145,7 @@ def test_la_descripcion_indica_origen_y_destino() -> None:
     descripcion, _ = aplicar(
         mut.mover_sentencia_a_distancia, cuerpo("D_global = a;", "D_otra = b;", "p->valor = 1;")
     )
-    assert descripcion is not None and descripcion.startswith("mover_sentencia(")
+    assert descripcion is not None and descripcion.startswith("mover_sentencia_a_distancia(")
 
 
 def test_sin_dos_sentencias_independientes_no_hay_movimiento() -> None:

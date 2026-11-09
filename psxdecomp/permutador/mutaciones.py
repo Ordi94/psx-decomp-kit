@@ -3456,9 +3456,12 @@ def mover_sentencia_a_distancia(ctx: Contexto) -> str | None:
             elegido.destino + 1, c.Expresion(expr=c.Asigna("=", c.Id(movida.nombre), movida.inicial))
         )
         movida.inicial = None
-        return f"mover_sentencia(asignacion de {movida.nombre} tras {elegido.destino - elegido.origen})"
+        return (
+            f"mover_sentencia_a_distancia(asignacion de {movida.nombre} "
+            f"tras {elegido.destino - elegido.origen})"
+        )
     items.insert(elegido.destino, items.pop(elegido.origen))
-    return f"mover_sentencia(de {elegido.origen} a {elegido.destino})"
+    return f"mover_sentencia_a_distancia(de {elegido.origen} a {elegido.destino})"
 
 
 def _es_envoltura(sentencia: c.Sentencia) -> bool:
