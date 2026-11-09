@@ -5,10 +5,18 @@ lo es: dependencia de lectura o escritura, llamada opaca, salto, direccion tomad
 valor o constante que desborda el tipo.
 """
 
+import re
+
+import pytest
 from psxdecomp.permutador import c
 from psxdecomp.permutador import mutaciones as mut
 
 from permutador.ayudantes_mutaciones import aplicar, cuerpo, sin_cambio, todas_las_variantes
+
+# Valores del tope fijados aqui, no leidos de la constante: si alguien los desactiva o los sube, la
+# prueba que los afirma contra ``mut`` falla en vez de seguir al valor modificado.
+ALCANCE_DE_REFERENCIA = 8
+MAX_ENVUELTAS_DE_REFERENCIA = 6
 
 # --- mover_sentencia_a_distancia -------------------------------------------------------------------------
 
@@ -153,12 +161,57 @@ def test_sin_dos_sentencias_independientes_no_hay_movimiento() -> None:
     sin_cambio(mut.mover_sentencia_a_distancia, cuerpo("if (a) {", "    D_global = 1;", "}", "return;"))
 
 
+def _sentencias_del_cuerpo(texto: str) -> list[str]:
+    """Las lineas del cuerpo de ``f`` sin sangrado, una por sentencia (las pruebas no anidan)."""
+    return [linea.strip() for linea in texto.splitlines()[2:-1]]
+
+
+def _desplazamiento_maximo(original: str, variante: str) -> int:
+    """Mayor cambio de posicion de una sentencia entre el original y la variante (sentencias unicas)."""
+    antes = _sentencias_del_cuerpo(original)
+    despues = _sentencias_del_cuerpo(variante)
+    assert sorted(antes) == sorted(despues)
+    return max(abs(despues.index(sentencia) - posicion) for posicion, sentencia in enumerate(antes))
+
+
+def _texto_de_alcance() -> str:
+    """Una sentencia seguida de doce independientes: sobra recorrido para superar cualquier tope."""
+    relleno = [f"q->clave = {i};" if i % 2 else f"D_otra = {i};" for i in range(12)]
+    return cuerpo("p->valor = 0;", "D_global = a;", *relleno, "q->valor = 1;")
+
+
 def test_el_alcance_de_un_movimiento_esta_acotado() -> None:
-    lineas = [f"p->valor = {i};" for i in range(12)]
-    lineas = ["D_global = a;", *[f"q->clave = {i};" if i % 2 else f"D_otra = {i};" for i in range(12)]]
-    texto = cuerpo("p->valor = 0;", *lineas, "q->valor = 1;")
-    for variante, _ in [(v, None) for v in todas_las_variantes(mut.mover_sentencia_a_distancia, texto)]:
-        assert variante.count("p->valor = 0;") == 1
+    texto = _texto_de_alcance()
+    distancias = {
+        _desplazamiento_maximo(texto, variante)
+        for variante in todas_las_variantes(mut.mover_sentencia_a_distancia, texto)
+    }
+    assert distancias
+    assert max(distancias) == mut.ALCANCE_MAXIMO_DE_MOVIMIENTO
+
+
+def test_sin_tope_de_alcance_el_movimiento_superaria_la_distancia_maxima(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(mut, "ALCANCE_MAXIMO_DE_MOVIMIENTO", 100)
+    texto = _texto_de_alcance()
+    distancias = {
+        _desplazamiento_maximo(texto, variante)
+        for variante in todas_las_variantes(mut.mover_sentencia_a_distancia, texto)
+    }
+    assert max(distancias) > ALCANCE_DE_REFERENCIA
+
+
+def test_con_dos_sentencias_independientes_la_distancia_uno_pertenece_a_orden_de_sentencias() -> None:
+    sin_cambio(mut.mover_sentencia_a_distancia, cuerpo("D_global = a;", "D_otra = b;"))
+
+
+def test_con_tres_sentencias_independientes_se_mueve_a_distancia_dos() -> None:
+    texto = cuerpo("D_global = a;", "D_otra = b;", "p->valor = 1;")
+    variantes = todas_las_variantes(mut.mover_sentencia_a_distancia, texto)
+    assert variantes
+    assert all(_desplazamiento_maximo(texto, variante) == 2 for variante in variantes)
+    assert cuerpo("D_otra = b;", "p->valor = 1;", "D_global = a;") in variantes
 
 
 # --- envolver_en_bloque ---------------------------------------------------------------------------------
@@ -221,10 +274,29 @@ def test_una_envoltura_no_se_envuelve_otra_vez_pero_se_pueden_envolver_sus_vecin
         assert "} while (0);\n    } while (0);\n    D_otra" not in variante
 
 
+def _sentencias_envueltas(variante: str) -> int:
+    """Cantidad de sentencias entre ``do {`` y ``} while (0);`` de la variante."""
+    bloques = re.findall(r"do \{\n(.*?)\n\s*\} while \(0\);", variante, re.DOTALL)
+    assert len(bloques) == 1
+    return sum(1 for linea in bloques[0].splitlines() if linea.strip().endswith(";"))
+
+
 def test_el_rango_envuelto_tiene_un_tope_de_sentencias() -> None:
     texto = cuerpo(*[f"g({i});" for i in range(10)])
-    for variante in todas_las_variantes(mut.envolver_en_bloque, texto):
-        assert variante.count("    g(") <= mut.MAX_SENTENCIAS_ENVUELTAS + 4
+    cantidades = {
+        _sentencias_envueltas(variante) for variante in todas_las_variantes(mut.envolver_en_bloque, texto)
+    }
+    assert cantidades
+    assert max(cantidades) == mut.MAX_SENTENCIAS_ENVUELTAS
+
+
+def test_sin_tope_de_envoltura_el_rango_superaria_el_maximo(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(mut, "MAX_SENTENCIAS_ENVUELTAS", 100)
+    texto = cuerpo(*[f"g({i});" for i in range(10)])
+    cantidades = {
+        _sentencias_envueltas(variante) for variante in todas_las_variantes(mut.envolver_en_bloque, texto)
+    }
+    assert max(cantidades) > MAX_ENVUELTAS_DE_REFERENCIA
 
 
 def test_contar_envolturas_cuenta_las_anidadas() -> None:

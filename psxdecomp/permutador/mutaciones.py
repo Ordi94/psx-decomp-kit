@@ -3993,7 +3993,9 @@ def dividir_asignacion(ctx: Contexto) -> str | None:
 
     Contexto:
         El compilador reparte los registros de otra forma cuando el resultado parcial vive en la propia
-        variable destino: ``r = a + b; r = r + c;`` o ``r = a; r += b + c;``. La inversa reconoce
+        variable destino. La division corta siempre por el operador de mas a la derecha: ``r = a + b + c;``
+        pasa a ``r = a + b; r = r + c;`` o a ``r = a + b; r += c;``, y una asignacion binaria simple,
+        ``r = a - b;``, pasa a ``r = a; r -= b;``. La inversa reconoce
         ``r = X; r = r op Y;`` y ``r = X; r op= Y;`` y los une en ``r = X op Y;``. Solo se aplica a una
         variable local sin direccion tomada de 32 bits o puntero (un destino estrecho truncaria el paso
         intermedio), con operandos puros que no mencionan la variable, y si el operador depende del signo
