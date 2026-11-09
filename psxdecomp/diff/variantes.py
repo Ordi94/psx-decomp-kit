@@ -19,6 +19,7 @@ from psxdecomp.construccion.infraestructura import (
     Ejecutor,
     ProcesoError,
     leer_direcciones_de_funciones,
+    leer_opciones_por_archivo,
     leer_valores_g,
     listar_fuentes_c,
 )
@@ -254,6 +255,9 @@ def probar_variantes(
     estados = fuentes_c.analizar_fuentes(listar_fuentes_c(raiz, rutas=rutas), convenciones)
     archivo, _ = fuentes_c.ubicar_funcion(estados, funcion, rutas.fuentes)
     valor_g = leer_valores_g(raiz, rutas=rutas, convenciones=convenciones).get(Path(archivo).stem, 0)
+    opciones_extra = leer_opciones_por_archivo(raiz, rutas=rutas, convenciones=convenciones).get(
+        Path(archivo).stem, ()
+    )
     direccion = leer_direcciones_de_funciones(raiz, rutas=rutas, convenciones=convenciones).get(funcion)
     with carpeta_de_trabajo(raiz, f"probar-{funcion}", rutas=rutas) as trabajo:
         objetivo, retornos, max_lineas = preparar_objetivo(
@@ -271,6 +275,7 @@ def probar_variantes(
                     ejecutar,
                     exigir_solo_texto=False,
                     valor_g=valor_g,
+                    opciones_extra=opciones_extra,
                     rutas=rutas,
                     convenciones=convenciones,
                     compilacion=compilacion,

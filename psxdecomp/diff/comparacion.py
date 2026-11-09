@@ -28,6 +28,7 @@ from psxdecomp.construccion.compilacion import HerramientasCompilacion, compilar
 from psxdecomp.construccion.infraestructura import (
     Ejecutor,
     leer_direcciones_de_funciones,
+    leer_opciones_por_archivo,
     leer_valores_g,
     listar_fuentes_c,
 )
@@ -537,6 +538,9 @@ def _comparar_en(
         definiciones=(convenciones.macro_no_coincidente,),
         exigir_solo_texto=False,
         valor_g=leer_valores_g(raiz, rutas=rutas, convenciones=convenciones).get(Path(archivo).stem, 0),
+        opciones_extra=leer_opciones_por_archivo(raiz, rutas=rutas, convenciones=convenciones).get(
+            Path(archivo).stem, ()
+        ),
         rutas=rutas,
         convenciones=convenciones,
         compilacion=compilacion,

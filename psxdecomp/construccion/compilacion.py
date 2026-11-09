@@ -27,6 +27,7 @@ from psxdecomp.construccion.infraestructura import (
     Herramientas,
     construir_con_compilador,
     ejecutar_proceso,
+    leer_opciones_por_archivo,
     leer_valores_g,
 )
 from psxdecomp.dominio import Compilacion, Convenciones, Rutas
@@ -176,6 +177,7 @@ def comando_compilar(
     *,
     max_valor_g: int,
     compilacion: Compilacion,
+    opciones_extra: Sequence[str] = (),
 ) -> list[str]:
     """
     Devuelve los argumentos que compilan C preprocesado a ensamblador.
@@ -193,6 +195,8 @@ def comando_compilar(
         valor_g (int, opcional): Umbral ``-G`` de datos pequenos.
         max_valor_g (int): Mayor umbral admitido (``Convenciones.max_valor_g``).
         compilacion (Compilacion): Seccion ``[compilacion]``; aporta las opciones del compilador.
+        opciones_extra (Sequence[str], opcional): Opciones propias de este archivo, ya validadas; van
+            despues de las globales y antes de ``-G``. Vacias, el comando es el de siempre.
 
     Returns:
         list[str]: Lista de argumentos.
@@ -206,7 +210,15 @@ def comando_compilar(
         )
     """
     _validar_valor_g(valor_g, max_valor_g)
-    return [str(compilador), *compilacion.opciones_compilador, f"-G{valor_g}", entrada, "-o", salida]
+    return [
+        str(compilador),
+        *compilacion.opciones_compilador,
+        *opciones_extra,
+        f"-G{valor_g}",
+        entrada,
+        "-o",
+        salida,
+    ]
 
 
 def comando_maspsx(
@@ -394,6 +406,7 @@ def compilar_fuente(
     exigir_solo_texto: bool = True,
     secciones_declaradas: Collection[str] = (),
     valor_g: int = 0,
+    opciones_extra: Sequence[str] = (),
     rutas: Rutas,
     convenciones: Convenciones,
     compilacion: Compilacion,
@@ -417,6 +430,7 @@ def compilar_fuente(
         secciones_declaradas (Collection[str], opcional): Secciones de datos que el subsegmento
             del archivo declara y que, por tanto, se aceptan.
         valor_g (int, opcional): Umbral ``-G`` de datos pequenos para este archivo.
+        opciones_extra (Sequence[str], opcional): Opciones del compilador propias de este archivo.
         rutas (Rutas): Seccion ``[rutas]`` del manifiesto (fuentes, cabeceras y macros).
         convenciones (Convenciones): Seccion ``[convenciones]`` (tope del umbral ``-G``).
         compilacion (Compilacion): Seccion ``[compilacion]`` (version de ``ASPSX`` y opciones).
@@ -441,6 +455,7 @@ def compilar_fuente(
         exigir_solo_texto=exigir_solo_texto,
         secciones_declaradas=secciones_declaradas,
         valor_g=valor_g,
+        opciones_extra=opciones_extra,
         rutas=rutas,
         convenciones=convenciones,
         compilacion=compilacion,
@@ -458,6 +473,7 @@ def compilar_archivo(
     exigir_solo_texto: bool = True,
     secciones_declaradas: Collection[str] = (),
     valor_g: int = 0,
+    opciones_extra: Sequence[str] = (),
     rutas: Rutas,
     convenciones: Convenciones,
     compilacion: Compilacion,
@@ -480,6 +496,7 @@ def compilar_archivo(
         exigir_solo_texto (bool, opcional): Si es verdadero, falla si el objeto aporta datos no declarados.
         secciones_declaradas (Collection[str], opcional): Secciones de datos aceptadas.
         valor_g (int, opcional): Umbral ``-G`` de datos pequenos.
+        opciones_extra (Sequence[str], opcional): Opciones del compilador propias de este archivo.
         rutas (Rutas): Seccion ``[rutas]`` del manifiesto (cabeceras y macros).
         convenciones (Convenciones): Seccion ``[convenciones]`` (tope del umbral ``-G``).
         compilacion (Compilacion): Seccion ``[compilacion]`` (version de ``ASPSX`` y opciones).
@@ -509,6 +526,7 @@ def compilar_archivo(
             valor_g,
             max_valor_g=convenciones.max_valor_g,
             compilacion=compilacion,
+            opciones_extra=opciones_extra,
         ),
         raiz,
         TIMEOUT_COMPILAR_S,
@@ -582,6 +600,7 @@ def construir_mixto(
     """
     resueltas: list[HerramientasCompilacion] = []
     valores_g = leer_valores_g(raiz, rutas=rutas, convenciones=convenciones)
+    extras = leer_opciones_por_archivo(raiz, rutas=rutas, convenciones=convenciones)
 
     def compilar(fuente: str, objeto: str) -> None:
         if not resueltas:
@@ -595,6 +614,7 @@ def construir_mixto(
             ejecutar,
             secciones_declaradas=permitidas,
             valor_g=valores_g.get(Path(fuente).stem, 0),
+            opciones_extra=extras.get(Path(fuente).stem, ()),
             rutas=rutas,
             convenciones=convenciones,
             compilacion=compilacion,

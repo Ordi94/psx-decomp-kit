@@ -539,6 +539,35 @@ def leer_valores_g(raiz: Path, *, rutas: Rutas, convenciones: Convenciones) -> d
     return {} if datos is None else dominio.valores_g_por_archivo(datos, convenciones)
 
 
+def leer_opciones_por_archivo(
+    raiz: Path, *, rutas: Rutas, convenciones: Convenciones
+) -> dict[str, tuple[str, ...]]:
+    """
+    Lee las opciones del compilador que el proyecto declara por archivo C.
+
+    Contexto:
+        Hermana de ``leer_valores_g``: ``build``, ``diff`` y ``permutar`` anaden estas opciones al comando
+        del compilador de ese archivo, despues de las globales. Un repositorio sin la clave (o sin el
+        archivo) no cambia ningun comando.
+
+    Args:
+        raiz (Path): Raiz del repositorio.
+        rutas (Rutas): Seccion ``[rutas]``; ``opciones_compilacion`` es el archivo TOML.
+        convenciones (Convenciones): Seccion ``[convenciones]`` (tope del umbral ``-G``).
+
+    Returns:
+        dict[str, tuple[str, ...]]: Opciones por nombre de archivo; vacio si no hay archivo o clave.
+
+    Raises:
+        ValueError: Si el archivo es invalido (ver ``dominio.opciones_por_archivo``).
+
+    Ejemplo:
+        extra = leer_opciones_por_archivo(Path("."), rutas=rutas, convenciones=convenciones)
+    """
+    datos = _leer_opciones(raiz, rutas)
+    return {} if datos is None else dominio.opciones_por_archivo(datos, convenciones)
+
+
 def _leer_simbolos(raiz: Path, rutas: Rutas) -> list[str]:
     """Lee, con cota de tamano, los archivos de simbolos que existen, en el orden del manifiesto."""
     textos: list[str] = []

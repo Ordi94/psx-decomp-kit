@@ -17,8 +17,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from typing import Any, cast
 
 from psxdecomp.dominio import Convenciones
+from psxdecomp.validacion import PATRON_OPCION_COMPILADOR
 
 TAMANO_CABECERA = 0x800
 MAGIA_PSX_EXE = b"PS-X EXE"
@@ -408,7 +410,8 @@ def fuente_de_objeto(objeto: str) -> str:
     return objeto[len("build/") : -len(".o")]
 
 
-CLAVES_OPCIONES_ARCHIVO = frozenset({"g"})
+CLAVES_OPCIONES_ARCHIVO = frozenset({"g", "opciones"})
+MAX_OPCIONES_ARCHIVO = 16
 _PATRON_ARCHIVO_C = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 
 
@@ -692,8 +695,78 @@ def valores_g_por_archivo(datos: object, convenciones: Convenciones) -> dict[str
         tope = convenciones.max_valor_g
         if isinstance(valor, bool) or not isinstance(valor, int) or not 0 <= valor <= tope:
             raise ValueError(f"opciones de compilacion: '{nombre}.g' debe ser un entero entre 0 y {tope}")
+        _validar_opciones_de_archivo(nombre, opciones.get("opciones", []))
         valores[nombre] = valor
     return valores
+
+
+def _validar_opciones_de_archivo(nombre: str, opciones: object) -> tuple[str, ...]:
+    """
+    Valida la lista ``opciones`` de un archivo y la devuelve como tupla.
+
+    Contexto:
+        Entrada no confiable: se admite una lista de hasta ``MAX_OPCIONES_ARCHIVO`` cadenas sin repetidos,
+        cada una con la forma de una opcion del compilador (guion, letra y caracteres de identificador, sin
+        espacios), con la misma lista de admitidos que ``opciones_compilador``: se rechazan ``-G`` y ``-o``.
+
+    Args:
+        nombre (str): Nombre del archivo, para el mensaje.
+        opciones (object): Valor de la clave ``opciones``.
+
+    Returns:
+        tuple[str, ...]: Opciones validadas, en el orden declarado.
+
+    Raises:
+        ValueError: Si no es una lista, excede la cota, hay repetidos o una opcion no cumple el patron.
+
+    Ejemplo:
+        extra = _validar_opciones_de_archivo("modulo_a", ["-fno-schedule-insns"])
+    """
+    if not isinstance(opciones, list) or len(opciones) > MAX_OPCIONES_ARCHIVO:
+        raise ValueError(
+            f"opciones de compilacion: '{nombre}.opciones' debe ser una lista de hasta "
+            f"{MAX_OPCIONES_ARCHIVO} cadenas"
+        )
+    for opcion in opciones:
+        if not isinstance(opcion, str) or PATRON_OPCION_COMPILADOR.fullmatch(opcion) is None:
+            raise ValueError(f"opciones de compilacion: '{nombre}.opciones' contiene una opcion no valida")
+    if len(set(opciones)) != len(opciones):
+        raise ValueError(f"opciones de compilacion: '{nombre}.opciones' tiene opciones repetidas")
+    return tuple(opciones)
+
+
+def opciones_por_archivo(datos: object, convenciones: Convenciones) -> dict[str, tuple[str, ...]]:
+    """
+    Devuelve las opciones adicionales del compilador declaradas por archivo.
+
+    Contexto:
+        Junto a ``g``, un archivo puede declarar ``opciones = ["-fno-schedule-insns"]``. ``build``,
+        ``diff`` y ``permutar`` las anaden al comando del compilador de ESE archivo, despues de las
+        opciones globales de ``[compilacion]``. Un archivo sin la clave no aparece en el resultado y su
+        comando es identico al de siempre.
+
+    Args:
+        datos (object): Resultado de ``tomllib.loads`` del archivo de opciones de compilacion.
+        convenciones (Convenciones): Aporta el mayor valor de ``-G`` admitido (la validacion es la misma
+            de ``valores_g_por_archivo``).
+
+    Returns:
+        dict[str, tuple[str, ...]]: Opciones por nombre de archivo; solo los que declaran alguna.
+
+    Raises:
+        ValueError: Si el archivo de opciones no es valido (ver ``valores_g_por_archivo``).
+
+    Ejemplo:
+        extra = opciones_por_archivo({"archivos": {"a": {"opciones": ["-fno-schedule-insns"]}}}, convenciones)
+    """
+    valores_g_por_archivo(datos, convenciones)
+    tabla = cast("dict[str, Any]", datos).get("archivos", {})
+    resultado: dict[str, tuple[str, ...]] = {}
+    for nombre, opciones in tabla.items():
+        declaradas = _validar_opciones_de_archivo(nombre, opciones.get("opciones", []))
+        if declaradas:
+            resultado[nombre] = declaradas
+    return resultado
 
 
 _SECCION_ELF_DE_TIPO = {".rodata": ".rodata", ".rdata": ".rodata", ".data": ".data"}

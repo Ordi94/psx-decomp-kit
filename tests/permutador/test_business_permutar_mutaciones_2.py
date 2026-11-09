@@ -817,7 +817,7 @@ def test_las_cinco_mutaciones_estan_registradas_con_su_peso() -> None:
     registradas = {nombre: peso for nombre, _, peso in mut.MUTACIONES}
     assert set(NUEVAS) <= set(registradas)
     assert all(0 < registradas[nombre] <= 4.0 for nombre in NUEVAS)
-    assert len(registradas) == len(mut.MUTACIONES) == 28
+    assert len(registradas) == len(mut.MUTACIONES) == 40
 
 
 MUESTRA_COMPLETA = cuerpo(

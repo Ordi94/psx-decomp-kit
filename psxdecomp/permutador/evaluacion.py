@@ -19,6 +19,7 @@ from psxdecomp.construccion.infraestructura import (
     Ejecutor,
     ProcesoError,
     leer_direcciones_de_funciones,
+    leer_opciones_por_archivo,
     leer_valores_g,
     listar_fuentes_c,
 )
@@ -80,6 +81,8 @@ class ObjetivoMedicion:
         compilacion: Seccion ``[compilacion]`` del manifiesto.
         elf: ELF de la ultima construccion, relativo a la raiz, contra el que se resuelven los simbolos
             al comparar por bytes.
+        opciones_extra: Opciones del compilador propias del archivo (clave ``opciones`` del archivo de
+            opciones de compilacion); vacias si no declara ninguna.
     """
 
     raiz: Path
@@ -100,6 +103,7 @@ class ObjetivoMedicion:
     convenciones: Convenciones
     compilacion: Compilacion
     elf: str
+    opciones_extra: tuple[str, ...] = ()
 
 
 def preparar_medicion(
@@ -186,6 +190,9 @@ def preparar_medicion(
         convenciones=convenciones,
         compilacion=compilacion,
         elf=elf,
+        opciones_extra=leer_opciones_por_archivo(raiz, rutas=rutas, convenciones=convenciones).get(
+            Path(archivo).stem, ()
+        ),
     )
 
 
@@ -268,6 +275,7 @@ def _evaluar_en(
         definiciones=(objetivo.convenciones.macro_no_coincidente,),
         exigir_solo_texto=False,
         valor_g=objetivo.valor_g,
+        opciones_extra=objetivo.opciones_extra,
         rutas=objetivo.rutas,
         convenciones=objetivo.convenciones,
         compilacion=objetivo.compilacion,
