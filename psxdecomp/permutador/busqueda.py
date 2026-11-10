@@ -24,6 +24,7 @@ from pathlib import Path
 from psxdecomp.construccion.compilacion import HerramientasCompilacion
 from psxdecomp.construccion.infraestructura import Ejecutor
 from psxdecomp.diff.comparacion import carpeta_de_trabajo, validar_funcion
+from psxdecomp.diff.ejes import EjesPuntuacion
 from psxdecomp.diff.fuentes_c import MAX_BYTES_FUENTE
 from psxdecomp.dominio import Compilacion, Convenciones, Rutas
 from psxdecomp.permutador import analisis as an
@@ -194,6 +195,7 @@ class Busqueda:
         opciones: Opciones,
         salida: Callable[[str], None],
         reloj: Callable[[], float],
+        ejes_partida: EjesPuntuacion | None = None,
     ) -> None:
         """
         Prepara una busqueda a partir de un estado (nuevo o reanudado).
@@ -207,7 +209,10 @@ class Busqueda:
             opciones (Opciones): Limites y paralelismo.
             salida (Callable[[str], None]): Destino de los avisos de progreso.
             reloj (Callable[[], float]): Reloj monotono en segundos.
+            ejes_partida (EjesPuntuacion | None, opcional): Ejes del mejor candidato de partida (el C
+                original en una busqueda nueva); ``None`` si se desconocen, como al reanudar.
         """
+        self.ejes_mejor = ejes_partida
         self.base = base
         self.envolturas_base = mut.contar_envolturas(base)
         self.texto_base = c.imprimir_funcion(base)
@@ -293,10 +298,16 @@ class Busqueda:
         Guarda una variante que mejora el mejor resultado.
 
         El estado, el registro y ``mejor.c`` declaran las envolturas de la variante: un candidato que las
-        contiene debe justificarse con el volcado del compilador antes de aplicarse.
+        contiene debe justificarse con el volcado del compilador antes de aplicarse. Cuando la variante
+        acepta una envoltura nueva (mas que el mejor anterior), su linea del registro lleva ademas los
+        ejes de la puntuacion secundaria antes y despues de esa aceptacion, para ver que movio la
+        envoltura: operandos (reparto de registros) o lineas reordenadas o insertadas (planificacion).
         """
         envolturas = self._envolturas_nuevas(variante.arbol)
         ejes = variante.resultado.ejes if variante.resultado else None
+        ejes_antes = self.ejes_mejor
+        acepta_envoltura = envolturas > self.estado.envolturas
+        self.ejes_mejor = ejes
         self.estado.puntuacion_mejor = puntuacion
         self.estado.envolturas = envolturas
         self.arbol_mejor = variante.arbol
@@ -305,7 +316,14 @@ class Busqueda:
         )
         iteracion = self.estado.iteraciones + posicion
         est.anadir_registro(
-            self.carpeta, iteracion, puntuacion, variante.mutaciones, envolturas=envolturas, ejes=ejes
+            self.carpeta,
+            iteracion,
+            puntuacion,
+            variante.mutaciones,
+            envolturas=envolturas,
+            ejes=ejes,
+            ejes_antes=ejes_antes,
+            acepta_envoltura=acepta_envoltura,
         )
         marca = f" [{envolturas} envolturas: justificar con el volcado]" if envolturas else ""
         self.salida(
@@ -478,8 +496,10 @@ def formatear_resumen(resumen: Resumen, raiz: Path) -> str:
     return "\n".join(lineas)
 
 
-def _medir_partida(objetivo: ObjetivoMedicion, texto_original: str, texto_reescrito: str) -> int:
-    """Mide el C original y su reescritura; deben dar la misma puntuacion."""
+def _medir_partida(
+    objetivo: ObjetivoMedicion, texto_original: str, texto_reescrito: str
+) -> tuple[int, EjesPuntuacion | None]:
+    """Mide el C original y su reescritura (misma puntuacion); devuelve la puntuacion y los ejes."""
     original = evaluar(objetivo, texto_original, comprobar_bytes_bajo=SIN_LIMITE_DE_BYTES)
     if original.puntuacion is None:
         raise ValueError(f"el C vigente de la funcion no se puede medir: {original.motivo}")
@@ -489,7 +509,7 @@ def _medir_partida(objetivo: ObjetivoMedicion, texto_original: str, texto_reescr
             "la reescritura del C de la funcion no reproduce su puntuacion "
             f"({original.puntuacion} frente a {reescrito.puntuacion}): no se puede permutar sin riesgo"
         )
-    return original.puntuacion
+    return original.puntuacion, original.ejes
 
 
 def permutar_funcion(
@@ -581,7 +601,7 @@ def permutar_funcion(
                 reloj=reloj,
             )
         else:
-            partida = _medir_partida(objetivo, texto_original, texto_base)
+            partida, ejes_partida = _medir_partida(objetivo, texto_original, texto_base)
             semilla = (
                 opciones.semilla if opciones.semilla is not None else random.SystemRandom().randrange(1 << 31)
             )
@@ -599,6 +619,7 @@ def permutar_funcion(
                 opciones=opciones,
                 salida=salida,
                 reloj=reloj,
+                ejes_partida=ejes_partida,
             )
             busqueda.iniciar_barrido()
         if busqueda.estado.puntuacion_mejor == 0:

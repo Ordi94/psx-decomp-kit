@@ -392,6 +392,8 @@ def anadir_registro(
     *,
     envolturas: int = 0,
     ejes: EjesPuntuacion | None = None,
+    ejes_antes: EjesPuntuacion | None = None,
+    acepta_envoltura: bool = False,
 ) -> None:
     """
     Agrega una linea a ``registro.jsonl`` por cada mejora.
@@ -399,7 +401,10 @@ def anadir_registro(
     Contexto:
         Documenta que reformulaciones llevaron a cada mejora, para saber cuales funcionan. Cada linea
         declara cuantas envolturas contiene la variante aceptada (``envolturas``, cero si ninguna) y la
-        puntuacion secundaria en tres ejes (``ejes``), que no interviene en la busqueda.
+        puntuacion secundaria en tres ejes (``ejes``), que no interviene en la busqueda. Si la linea
+        acepta una envoltura nueva (``acepta_envoltura``), lleva ``efectoDeEnvolturas`` con los tres ejes
+        despues de la aceptacion y, si se conocen, antes de ella: la envoltura solo se justifica cuando
+        mueve el eje de operandos (reparto de registros), no cuando solo reordena o inserta lineas.
 
     Args:
         carpeta (Path): Carpeta de estado.
@@ -408,6 +413,8 @@ def anadir_registro(
         mutaciones (list[str]): Mutaciones aplicadas a la variante respecto a la anterior.
         envolturas (int, opcional): Envolturas que la variante anade al C original.
         ejes (EjesPuntuacion | None, opcional): Ejes de la variante, si se pudieron calcular.
+        ejes_antes (EjesPuntuacion | None, opcional): Ejes del mejor candidato anterior, si se conocen.
+        acepta_envoltura (bool, opcional): Si la variante contiene mas envolturas que el mejor anterior.
 
     Ejemplo:
         anadir_registro(carpeta, 41, 10, ["orden_sentencias(posiciones 3 y 4)"])
@@ -421,6 +428,9 @@ def anadir_registro(
     }
     if ejes is not None:
         datos["ejes"] = ejes.como_json()
+        if acepta_envoltura:
+            efecto: dict[str, object] = {} if ejes_antes is None else {"antes": ejes_antes.como_json()}
+            datos["efectoDeEnvolturas"] = {**efecto, "despues": ejes.como_json()}
     linea = json.dumps(datos)
     with (carpeta / "registro.jsonl").open("a", encoding="utf-8", newline="\n") as salida:
         salida.write(linea + "\n")
