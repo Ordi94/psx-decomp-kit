@@ -17,7 +17,7 @@ Un paquete Python, `psxdecomp`, con las piezas genericas de un proyecto de desco
 - instalacion verificada del toolchain externo (SDK, binutils, `maspsx`, `asm-differ`);
 - cargador y validador del manifiesto `psxdecomp.toml`, unica fuente de todo lo que depende del proyecto.
 
-Version 0.3.0, Python 3.13 o superior, licencia MIT.
+Version 0.3.1, Python 3.13 o superior, licencia MIT.
 
 ## Que no es
 
@@ -455,10 +455,38 @@ de que la busqueda sortee.
 | `ancho_de_variable_de_retorno` | 1,0 | Pasa a 16 bits una local de 32 bits que solo recibe retornos de llamadas y solo se lee truncada. |
 | `limite_en_local_antes_del_incremento` | 1,0 | Lee el limite de un bucle `do` en una local justo antes de la sentencia de avance. |
 | `copia_local_por_rama` | 1,0 | Copia un puntero donde se define y lo usa solo en una rama de un `if`. |
+| `acceso_por_desplazamiento` | 1,5 | Pasa `p->c`, `(*p).c` y `p[i]` (`i` constante) a `*(T*)((u8*)p + D)`, solo si se conoce el desplazamiento `D`: ver "Acceso por desplazamiento". |
+| `almacen_directo_en_cada_rama` | 1,5 | Quita la variable que une las dos ramas de un `if/else` y solo alimenta un almacen (`o->c = A;` en una rama y `o->c = B;` en la otra), o la introduce. |
+| `leer_bajo_la_guarda` | 1,5 | Mueve `u = e;` bajo la guarda del `if` que sigue y es el unico que usa `u`: al cuerpo, o a un `if (g)` propio si la condicion es `g && resto`. |
 
 Las mutaciones que razonan sobre el valor de una variable en un punto usan el seguimiento de copias vigentes
 de un bloque: solo copias directas entre variables seguras (sin la direccion tomada ni nombre ambiguo) del
 mismo tipo escalar, que cualquier escritura posterior, etiqueta o salto anula.
+
+### Acceso por desplazamiento
+
+`acceso_por_desplazamiento` renuncia a la sintaxis de campo: el compilador deja de ver una referencia a un
+miembro y construye la direccion como una suma de bytes, con otro reparto de registros. El desplazamiento sale
+de `TablaTipos.disposicion`, que `construir_tabla` calcula con alineacion natural (enteros de 8, 16 y 32 bits y
+punteros de 4 bytes, arreglos con dimension literal). Un campo de bits, una estructura anidada, un puntero a
+funcion, un tipo de tamano desconocido o una dimension que no es un literal detienen el calculo: los campos
+siguientes no tienen desplazamiento y la mutacion no los toca; nunca se inventa uno. Para `p[i]` con `i`
+constante, `D = i * sizeof(T)`. Solo actua sobre punteros: un miembro de un objeto de direccion constante
+(global de estructura, `&obj`, direccion literal) queda como esta. El byte se escribe `u8` si las cabeceras lo
+definen con `typedef` y `unsigned char` si no.
+
+### `almacen_directo_en_cada_rama` y `leer_bajo_la_guarda`
+
+`almacen_directo_en_cada_rama` exige que la variable y el miembro tengan el mismo tipo, que los dos valores
+sean puros y no lean lo que escribe el almacen, y que el almacen siga al `if` con la variable como ultima
+escritura de cada rama. Su inversa introduce la variable cuando las dos ramas terminan escribiendo el mismo
+destino sin efectos.
+
+`leer_bajo_la_guarda` solo mueve una asignacion situada justo antes del `if`, cuya local solo se usa dentro de
+el (condicion o cuerpo, nunca la rama `else` ni despues), con un valor sin efectos que la condicion no cambia.
+Si la local se usa en la condicion, esta debe ser `g && resto` con `g` pura: la asignacion pasa a `if (g)` y
+se conserva el cortocircuito. La local puede quedar sin inicializar en los caminos donde no se lee; en C89 eso
+es correcto, porque solo es un error leerla antes de asignarla.
 
 ### Envolturas
 
@@ -467,7 +495,12 @@ compilador. Por eso `envolver_en_bloque` solo produce CANDIDATOS que una persona
 volcado del compilador antes de aplicarlos. La marca es comprobable en tres sitios:
 
 - `estado.json` guarda `envolturas`: las que `mejor.c` anade al C de partida.
-- Cada linea de `registro.jsonl` lleva `envolturas` (cero si ninguna) y, si se pudo calcular, `ejes`.
+- Cada linea de `registro.jsonl` lleva `envolturas` (cero si ninguna) y, si se pudo calcular, `ejes`. La
+  linea que acepta una envoltura nueva lleva ademas `efectoDeEnvolturas` con los tres ejes `antes` (los del
+  mejor anterior, o los del C de partida; se omiten al reanudar una busqueda) y `despues` de esa aceptacion.
+  La envoltura solo se justifica cuando mueve el eje de operandos (`diferenciasDeOperando`: reparto de
+  registros); si solo cambian `lineasReordenadas` o `lineasInsertadasOBorradas` (orden de planificacion), no
+  hay motivo para conservarla.
 - `mejor.c` lleva, tras la linea de puntuacion, un comentario de una linea
   (`/* El candidato contiene N envolturas do { } while (0) sin codigo que requieren justificacion ... */`)
   solo si `envolturas` es mayor que cero; el resumen de `permutar` repite el aviso.

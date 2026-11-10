@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "psx-decomp-kit"
-version = "0.3.0"
+version = "0.3.1"
 description = "Herramientas de descompilacion matching para juegos de PlayStation 1"
 readme = "README.md"
 requires-python = ">=3.13"

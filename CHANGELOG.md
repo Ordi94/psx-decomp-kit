@@ -2,6 +2,26 @@
 
 El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y el versionado es semantico.
 
+## [0.3.1] - 2026-11-10
+
+### Anadido
+
+Tres mutaciones nuevas del buscador de variantes del permutador, con las comprobaciones de seguridad semantica
+de las existentes, y una marca mas util para las envolturas:
+
+- `acceso_por_desplazamiento`: pasa `p->c`, `(*p).c` y `p[i]` (con `i` constante) a `*(T*)((u8*)p + D)`; solo
+  actua sobre punteros y solo si la disposicion de la estructura permite afirmar el desplazamiento `D`.
+- `almacen_directo_en_cada_rama`: elimina la variable que une las ramas de un `if/else` y solo alimenta un
+  almacen, escribiendo el destino en cada rama, y la inversa.
+- `leer_bajo_la_guarda`: mueve `u = e;` bajo la guarda del `if` que es el unico que usa `u`, al cuerpo o a un
+  `if (g)` propio cuando la condicion es `g && resto`.
+- `TablaTipos.disposicion`: desplazamiento de cada campo de las estructuras con alineacion natural, hasta el
+  primer campo de bits, estructura anidada o tipo de tamano desconocido.
+- Cada linea de `registro.jsonl` que acepta una envoltura nueva lleva `efectoDeEnvolturas`, con los tres ejes
+  de la puntuacion secundaria antes y despues de la aceptacion; la funcion objetivo no cambia.
+- Pruebas de integracion que comprueban que las quince mutaciones de 0.3.0 y 0.3.1 estan registradas con su
+  peso y que el barrido de vecinos y la busqueda las intentan.
+
 ## [0.3.0] - 2026-11-09
 
 ### Anadido
