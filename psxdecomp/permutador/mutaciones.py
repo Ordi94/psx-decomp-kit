@@ -4516,6 +4516,479 @@ def copia_local_por_rama(ctx: Contexto) -> str | None:
 
 
 # ---------------------------------------------------------------------------------------------------
+# Acceso por desplazamiento de bytes
+# ---------------------------------------------------------------------------------------------------
+
+
+def _nombre_del_byte(ctx: Contexto) -> str:
+    """Nombre del byte sin signo: ``u8`` si las cabeceras lo definen; si no, ``unsigned char``."""
+    return "u8" if "u8" in ctx.entorno.tabla.nombres_de_tipo else "unsigned char"
+
+
+def _es_direccion_fija(base: c.Expr) -> bool:
+    """La base no depende de ninguna variable (``(T*)0x...``) o es la direccion de un objeto (``&obj``)."""
+    nodos = list(c.recorrer(base))
+    return not any(isinstance(n, c.Id) for n in nodos) or any(
+        isinstance(n, c.Unario) and n.op == "&" for n in nodos
+    )
+
+
+def _miembro_con_desplazamiento(ctx: Contexto, nodo: c.Miembro) -> tuple[c.Expr, an.Tipo, int] | None:
+    """Puntero, tipo del miembro y desplazamiento si ``p->c`` o ``(*p).c`` tiene una posicion conocida."""
+    if nodo.flecha:
+        puntero = nodo.base
+    elif isinstance(nodo.base, c.Unario) and nodo.base.op == "*":
+        puntero = nodo.base.operando
+    else:
+        return None
+    tipo = ctx.entorno.inferir(puntero)
+    if tipo is None or not tipo.es_puntero or tipo.estrellas != 1:
+        return None
+    nombre = an.nombre_de_estructura(tipo.base)
+    desplazamiento = ctx.entorno.tabla.disposicion.get(nombre, {}).get(nodo.campo)
+    miembro = ctx.entorno.tabla.estructuras.get(nombre, {}).get(nodo.campo)
+    if desplazamiento is None or miembro is None or not miembro.es_escalar:
+        return None
+    return puntero, miembro, desplazamiento
+
+
+def _elemento_con_desplazamiento(ctx: Contexto, nodo: c.Indice) -> tuple[c.Expr, an.Tipo, int] | None:
+    """Puntero, tipo y desplazamiento si ``p[i]`` tiene ``i`` constante y un elemento de tamano conocido."""
+    indice = an.valor_de_literal(nodo.indice)
+    tipo = ctx.entorno.inferir(nodo.base)
+    elemento = ctx.entorno.inferir(nodo)
+    if indice is None or indice < 0 or tipo is None or not tipo.es_puntero or elemento is None:
+        return None
+    tamano = an.tamano_de_tipo(elemento.base, elemento.estrellas) if elemento.es_escalar else None
+    return None if tamano is None else (nodo.base, elemento, indice * tamano)
+
+
+def _accesos_por_desplazamiento(ctx: Contexto) -> list[tuple[Sitio, c.Expr, str]]:
+    """
+    Accesos a miembro o a elemento constante con posicion conocida, con su forma ``*(T*)((u8*)p + D)``.
+
+    La base debe ser un puntero (nunca un objeto de direccion constante), el miembro un escalar y su
+    desplazamiento debe constar en la disposicion de la estructura; el acceso no puede ser el operando
+    de un ``&``. Cada forma evalua la base una sola vez.
+    """
+    byte = _nombre_del_byte(ctx)
+    candidatos: list[tuple[Sitio, c.Expr, str]] = []
+    for sentencia, raiz in _todas_las_expresiones(ctx.funcion):
+        for sitio in sitios_de(raiz, sentencia):
+            nodo = sitio.nodo
+            partes: tuple[c.Expr, an.Tipo, int] | None = None
+            if isinstance(nodo, c.Miembro):
+                partes = _miembro_con_desplazamiento(ctx, nodo)
+            elif isinstance(nodo, c.Indice):
+                partes = _elemento_con_desplazamiento(ctx, nodo)
+            if (
+                partes is None
+                or _es_direccion_fija(partes[0])
+                or (isinstance(sitio.padre, c.Unario) and sitio.padre.op == "&")
+            ):
+                continue
+            base, tipo, desplazamiento = partes
+            direccion = c.Binario(
+                "+", c.Conversion(f"{byte}*", copy.deepcopy(base)), c.Num(str(desplazamiento))
+            )
+            forma = c.Unario("*", c.Conversion(f"{tipo.texto}*", direccion))
+            candidatos.append(
+                (sitio, forma, f"acceso_por_desplazamiento({an.texto_de(nodo)} en +{desplazamiento})")
+            )
+    return candidatos
+
+
+def acceso_por_desplazamiento(ctx: Contexto) -> str | None:
+    """
+    Reescribe un acceso a miembro o a elemento constante como un acceso por desplazamiento de bytes.
+
+    Contexto:
+        Inversa de ``forma_de_acceso_a_struct`` en el sentido de que renuncia a la sintaxis de campo:
+        ``p->c``, ``(*p).c`` y ``p[i]`` (con ``i`` constante) pasan a ``*(T*)((u8*)p + D)``, con ``T`` el
+        tipo del miembro y ``D`` su posicion en bytes. El compilador deja de ver una referencia a un
+        campo y construye la direccion como una suma de bytes, lo que cambia el reparto de registros.
+        El desplazamiento sale de la disposicion de la estructura que lee ``construir_tabla``
+        (alineacion natural); si el kit no la conoce (campos de bits, estructuras anidadas, tipos de
+        tamano desconocido antes del campo) no se aplica: nunca se inventa un desplazamiento. Para
+        ``p[i]``, ``D = i * sizeof(T)`` con los tamanos de los enteros de 8, 16 y 32 bits y los punteros
+        (4). No se aplica a miembros de un objeto de direccion constante (globales de estructura, ``&obj``,
+        direcciones literales): solo a punteros. El byte se escribe ``u8`` si las cabeceras lo definen y
+        ``unsigned char`` si no.
+
+    Args:
+        ctx (Contexto): Contexto de la ronda.
+
+    Returns:
+        str | None: Descripcion, o ``None`` si ningun acceso tiene una posicion conocida.
+
+    Ejemplo:
+        descripcion = acceso_por_desplazamiento(contexto)
+    """
+    elegido = _elegir(ctx.azar, _accesos_por_desplazamiento(ctx))
+    if elegido is None:
+        return None
+    sitio, forma, descripcion = elegido
+    c.reemplazar_hijo(sitio.padre, sitio.nodo, forma)
+    return descripcion
+
+
+# ---------------------------------------------------------------------------------------------------
+# Almacen directo en cada rama
+# ---------------------------------------------------------------------------------------------------
+
+
+def _asignacion_final(rama: c.Bloque | None) -> c.Asigna | None:
+    """La asignacion simple ``x = e;`` que cierra una rama, si la ultima sentencia lo es."""
+    if rama is None or not rama.items:
+        return None
+    ultima = rama.items[-1]
+    if isinstance(ultima, c.Expresion) and isinstance(ultima.expr, c.Asigna) and ultima.expr.op == "=":
+        return ultima.expr
+    return None
+
+
+def _es_destino_de_memoria(expr: c.Expr) -> bool:
+    """El destino es un acceso a memoria (``o->c``, ``a[i]``) cuyos operandos no tienen efectos."""
+    return isinstance(expr, c.Miembro | c.Indice) and an.es_pura(expr)
+
+
+def _mismo_tipo_escalar(a: an.Tipo | None, b: an.Tipo | None) -> bool:
+    """Dos tipos escalares conocidos con el mismo ancho, signo y nivel de puntero: convertir no hace nada."""
+    return (
+        a is not None
+        and b is not None
+        and a.es_escalar
+        and b.es_escalar
+        and (a.estrellas, a.ancho, a.con_signo) == (b.estrellas, b.ancho, b.con_signo)
+        and (a.estrellas == 0 or a.base == b.base)
+    )
+
+
+def _sin_etiquetas(*ramas: c.Bloque | None) -> bool:
+    """Ninguna de las ramas contiene etiquetas, ``case`` ni directivas."""
+    return not any(_tiene_etiqueta(s) for rama in ramas if rama is not None for s in rama.items)
+
+
+def _almacen_unico_de_local(
+    ctx: Contexto, bloque: c.Bloque, indice: int
+) -> tuple[c.Si, c.Expresion, c.Asigna, c.Asigna, str] | None:
+    """``if`` con ``else`` seguido de ``o->c = v;`` con ``v`` escrita al final de cada rama y sin mas usos."""
+    sentencia = bloque.items[indice]
+    almacen = bloque.items[indice + 1]
+    if not (
+        isinstance(sentencia, c.Si)
+        and sentencia.sino is not None
+        and isinstance(almacen, c.Expresion)
+        and isinstance(almacen.expr, c.Asigna)
+        and almacen.expr.op == "="
+        and isinstance(almacen.expr.valor, c.Id)
+        and _es_destino_de_memoria(almacen.expr.destino)
+    ):
+        return None
+    nombre = almacen.expr.valor.nombre
+    declaracion = _declaraciones_simples(ctx).get(nombre)
+    entonces, sino = _asignacion_final(sentencia.entonces), _asignacion_final(sentencia.sino)
+    usos = _usos_de(ctx.funcion, nombre)
+    if (
+        declaracion is None
+        or declaracion[1].inicial is not None
+        or entonces is None
+        or sino is None
+        or not _es_id(entonces.destino, nombre)
+        or not _es_id(sino.destino, nombre)
+        or len(usos) != 3
+        or sum(1 for _, sitio in usos if sitio.lvalue) != 2
+        or not _sin_etiquetas(sentencia.entonces, sentencia.sino)
+    ):
+        return None
+    return sentencia, almacen, entonces, sino, nombre
+
+
+def _almacenes_directos(ctx: Contexto) -> list[Callable[[], str]]:
+    """
+    Formas de eliminar la variable que une las ramas de un ``if/else`` y solo alimenta un almacen.
+
+    La variable y el miembro tienen el mismo tipo (convertir el valor por la variable no cambia nada),
+    los dos valores son puros y no leen lo que escribe el almacen, y el destino no tiene efectos ni
+    menciona la variable. Cada rama escribe el almacen justo donde antes escribia la variable.
+    """
+    ambiguos = nombres_ambiguos(ctx.funcion)
+    acciones: list[Callable[[], str]] = []
+    for bloque in c.todos_los_bloques(ctx.funcion.cuerpo):
+        for indice in range(len(bloque.items) - 1):
+            partes = _almacen_unico_de_local(ctx, bloque, indice)
+            if partes is None:
+                continue
+            _, almacen, entonces, sino, nombre = partes
+            assert isinstance(almacen.expr, c.Asigna)  # noqa: S101
+            destino = almacen.expr.destino
+            escritura = an.efectos_de(almacen, ctx.alias)
+            if (
+                not _mismo_tipo_escalar(ctx.entorno.locales.get(nombre), ctx.entorno.inferir(destino))
+                or an.identificadores_de(destino) & ambiguos
+                or any(
+                    not an.es_pura(valor.valor)
+                    or an.escritura_alcanza(
+                        escritura, an.efectos_de(c.Expresion(expr=valor.valor), ctx.alias)
+                    )
+                    for valor in (entonces, sino)
+                )
+            ):
+                continue
+            acciones.append(partial(_escribir_directo, ctx, bloque, indice, partes))
+    return acciones
+
+
+def _escribir_directo(
+    ctx: Contexto, bloque: c.Bloque, indice: int, partes: tuple[c.Si, c.Expresion, c.Asigna, c.Asigna, str]
+) -> str:
+    """Aplica ``almacen_directo_en_cada_rama`` en su sentido directo: cada rama escribe el almacen."""
+    sentencia, almacen, entonces, sino, nombre = partes
+    assert isinstance(almacen.expr, c.Asigna) and sentencia.sino is not None  # noqa: S101
+    destino = almacen.expr.destino
+    for rama, asignacion in ((sentencia.entonces, entonces), (sentencia.sino, sino)):
+        comentarios = rama.items[-1].comentarios
+        rama.items[-1] = c.Expresion(
+            expr=c.Asigna("=", copy.deepcopy(destino), asignacion.valor), comentarios=comentarios
+        )
+    del bloque.items[indice + 1]
+    _quitar_declaracion(ctx.funcion, nombre)
+    return f"almacen_directo_en_cada_rama({nombre} en {an.texto_de(destino)})"
+
+
+def _almacenes_por_variable(ctx: Contexto) -> list[Callable[[], str]]:
+    """
+    Formas de introducir la variable que une las ramas: ambas terminan escribiendo el mismo destino.
+
+    Es la inversa de ``_almacenes_directos``: el destino es el mismo texto en las dos ramas y no tiene
+    efectos, ni menciona nombres ambiguos; los valores son puros y el tipo del destino es un escalar
+    conocido, que es el de la variable nueva.
+    """
+    ambiguos = nombres_ambiguos(ctx.funcion)
+    acciones: list[Callable[[], str]] = []
+    for bloque in c.todos_los_bloques(ctx.funcion.cuerpo):
+        for indice, sentencia in enumerate(bloque.items):
+            if not isinstance(sentencia, c.Si) or sentencia.sino is None:
+                continue
+            entonces, sino = _asignacion_final(sentencia.entonces), _asignacion_final(sentencia.sino)
+            if entonces is None or sino is None:
+                continue
+            tipo = ctx.entorno.inferir(entonces.destino)
+            if (
+                tipo is None
+                or not tipo.es_escalar
+                or not _es_destino_de_memoria(entonces.destino)
+                or an.texto_de(entonces.destino) != an.texto_de(sino.destino)
+                or an.identificadores_de(entonces.destino) & ambiguos
+                or not an.es_pura(entonces.valor)
+                or not an.es_pura(sino.valor)
+                or not _sin_etiquetas(sentencia.entonces, sentencia.sino)
+            ):
+                continue
+            acciones.append(partial(_escribir_por_variable, ctx, bloque, indice, (entonces, sino), tipo))
+    return acciones
+
+
+def _escribir_por_variable(
+    ctx: Contexto, bloque: c.Bloque, indice: int, asignaciones: tuple[c.Asigna, c.Asigna], tipo: an.Tipo
+) -> str:
+    """Aplica ``almacen_directo_en_cada_rama`` en su sentido inverso: las ramas escriben una variable."""
+    sentencia = bloque.items[indice]
+    assert isinstance(sentencia, c.Si) and sentencia.sino is not None  # noqa: S101
+    entonces, sino = asignaciones
+    destino = entonces.destino
+    nombre = _nombre_temporal(ctx)
+    for rama, asignacion in ((sentencia.entonces, entonces), (sentencia.sino, sino)):
+        comentarios = rama.items[-1].comentarios
+        rama.items[-1] = c.Expresion(
+            expr=c.Asigna("=", c.Id(nombre), asignacion.valor), comentarios=comentarios
+        )
+    bloque.items.insert(indice + 1, c.Expresion(expr=c.Asigna("=", copy.deepcopy(destino), c.Id(nombre))))
+    _declarar_temporal(ctx, nombre, tipo)
+    return f"almacen_directo_en_cada_rama({nombre} desde {an.texto_de(destino)})"
+
+
+def almacen_directo_en_cada_rama(ctx: Contexto) -> str | None:
+    """
+    Quita la variable que une las dos ramas de un ``if/else`` y solo alimenta un almacen, o la introduce.
+
+    Contexto:
+        En ``if (c) { v = A; } else { v = B; } o->c = v;`` la variable ``v`` ocupa un pseudoregistro que
+        vive a traves de la union de las ramas. Escribir ``o->c = A;`` y ``o->c = B;`` en cada rama lo
+        elimina y cambia el reparto de registros; la inversa lo recrea. En el sentido directo ``v`` no
+        puede tener mas usos que sus dos escrituras y el almacen, el almacen debe seguir al ``if`` y
+        ``v`` debe ser lo ultimo que cada rama escribe (asi nada entre la rama y el almacen cambia los
+        operandos), la variable y el miembro deben tener el mismo tipo, y ``A`` y ``B`` deben ser puros y
+        no leer nada que el almacen escriba. En el sentido inverso las dos ramas deben terminar con el mismo
+        destino sin efectos y valores puros; la variable nueva toma el tipo del destino.
+
+    Args:
+        ctx (Contexto): Contexto de la ronda.
+
+    Returns:
+        str | None: Descripcion, o ``None`` si ningun ``if/else`` cumple las condiciones.
+
+    Ejemplo:
+        descripcion = almacen_directo_en_cada_rama(contexto)
+    """
+    elegida = _elegir(ctx.azar, [*_almacenes_directos(ctx), *_almacenes_por_variable(ctx)])
+    return None if elegida is None else elegida()
+
+
+# ---------------------------------------------------------------------------------------------------
+# Leer bajo la guarda
+# ---------------------------------------------------------------------------------------------------
+
+
+def _apariciones_en(sentencias: list[c.Sentencia], nombre: str) -> int:
+    """Cuantas veces aparece una variable en las sentencias y en todo lo que contienen."""
+    return sum(
+        1
+        for sentencia in sentencias
+        for interna in _anidadas(sentencia)
+        for raiz in c.expresiones_de(interna)
+        for nodo in c.recorrer(raiz)
+        if isinstance(nodo, c.Id) and nodo.nombre == nombre
+    )
+
+
+def _condicion_respeta_lectura(ctx: Contexto, condicion: c.Expr, valor: c.Expr) -> bool:
+    """
+    La condicion no cambia nada de lo que lee ``valor``, asi que leerlo antes o despues de ella da igual.
+
+    Una condicion con llamadas solo se admite si ``valor`` lee unicamente variables locales sin
+    direccion tomada que la condicion no escribe: ninguna llamada puede verlas ni cambiarlas.
+    """
+    escribe = an.efectos_de(c.Expresion(expr=condicion), ctx.alias)
+    lee = an.efectos_de(c.Expresion(expr=valor), ctx.alias)
+    if an.identificadores_de(valor) & set(_nombres_escritos(condicion)):
+        return False
+    if escribe.barrera:
+        return _solo_variables_seguras(ctx, lee, _nombres_inseguros(ctx))
+    return not an.escritura_alcanza(escribe, lee)
+
+
+def _asignacion_de_local_antes_del_si(
+    ctx: Contexto, bloque: c.Bloque, indice: int
+) -> tuple[str, c.Expr, c.Si] | None:
+    """Nombre, valor e ``if`` si ``u = e;`` va justo antes de un ``if`` y ``u`` solo se usa dentro de el."""
+    asignacion, si = bloque.items[indice], bloque.items[indice + 1]
+    if not (
+        isinstance(si, c.Si)
+        and isinstance(asignacion, c.Expresion)
+        and isinstance(asignacion.expr, c.Asigna)
+        and asignacion.expr.op == "="
+        and isinstance(asignacion.expr.destino, c.Id)
+    ):
+        return None
+    nombre, valor = asignacion.expr.destino.nombre, asignacion.expr.valor
+    declaracion = _declaraciones_simples(ctx).get(nombre)
+    en_condicion = sum(1 for n in c.recorrer(si.cond) if isinstance(n, c.Id) and n.nombre == nombre)
+    en_cuerpo = _apariciones_en([si.entonces], nombre)
+    if (
+        declaracion is None
+        or declaracion[1].inicial is not None
+        or len(_usos_de(ctx.funcion, nombre)) != 1 + en_condicion + en_cuerpo
+        or en_condicion + en_cuerpo == 0
+        or not an.es_pura(valor)
+        or an.identificadores_de(valor) & nombres_ambiguos(ctx.funcion)
+        or not _condicion_respeta_lectura(ctx, si.cond, valor)
+    ):
+        return None
+    return nombre, valor, si
+
+
+def _guarda_separable(si: c.Si, nombre: str) -> bool:
+    """La condicion es ``g && resto`` con ``g`` pura y sin la variable, que solo aparece en ``resto``."""
+    cond = si.cond
+    return (
+        isinstance(cond, c.Binario)
+        and cond.op == "&&"
+        and an.es_pura(cond.izq)
+        and nombre not in an.identificadores_de(cond.izq)
+    )
+
+
+def _lecturas_bajo_la_guarda(ctx: Contexto) -> list[Callable[[], str]]:
+    """
+    Formas de mover ``u = e;`` bajo la guarda del ``if`` que sigue.
+
+    Si ``u`` solo se usa en el cuerpo, la asignacion pasa a ser su primera sentencia (tras las
+    declaraciones, que no pueden tener inicializador). Si se usa en la condicion, esta debe ser
+    ``g && resto``: la asignacion queda bajo un ``if (g)`` propio y el original conserva la condicion
+    completa, de modo que ``resto`` nunca ve ``u`` sin asignar.
+    """
+    acciones: list[Callable[[], str]] = []
+    for bloque in c.todos_los_bloques(ctx.funcion.cuerpo):
+        for indice in range(len(bloque.items) - 1):
+            partes = _asignacion_de_local_antes_del_si(ctx, bloque, indice)
+            if partes is None:
+                continue
+            nombre, _, si = partes
+            en_condicion = any(isinstance(n, c.Id) and n.nombre == nombre for n in c.recorrer(si.cond))
+            cabeza = si.entonces.items[: _fin_de_declaraciones(si.entonces)]
+            if en_condicion and _guarda_separable(si, nombre):
+                acciones.append(partial(_leer_tras_la_guarda, bloque, indice, nombre))
+            elif (
+                not en_condicion
+                and not _tiene_etiqueta(si.entonces)
+                and all(isinstance(d, c.Decl) and d.inicial is None for d in cabeza)
+            ):
+                acciones.append(partial(_leer_en_el_cuerpo, bloque, indice, nombre))
+    return acciones
+
+
+def _leer_en_el_cuerpo(bloque: c.Bloque, indice: int, nombre: str) -> str:
+    """Mueve ``u = e;`` a la primera sentencia del cuerpo del ``if`` que le sigue."""
+    asignacion, si = bloque.items[indice], bloque.items[indice + 1]
+    assert isinstance(si, c.Si)  # noqa: S101
+    si.entonces.items.insert(_fin_de_declaraciones(si.entonces), asignacion)
+    del bloque.items[indice]
+    return f"leer_bajo_la_guarda({nombre} en el cuerpo)"
+
+
+def _leer_tras_la_guarda(bloque: c.Bloque, indice: int, nombre: str) -> str:
+    """Deja ``u = e;`` bajo un ``if (g)`` propio, delante del ``if (g && resto)`` original."""
+    asignacion, si = bloque.items[indice], bloque.items[indice + 1]
+    assert isinstance(si, c.Si) and isinstance(si.cond, c.Binario)  # noqa: S101
+    bloque.items[indice] = c.Si(
+        cond=copy.deepcopy(si.cond.izq),
+        entonces=c.Bloque(items=[asignacion]),
+        comentarios=asignacion.comentarios,
+    )
+    asignacion.comentarios = ()
+    return f"leer_bajo_la_guarda({nombre} tras la guarda)"
+
+
+def leer_bajo_la_guarda(ctx: Contexto) -> str | None:
+    """
+    Mueve la lectura de una local bajo la guarda del ``if`` que la usa.
+
+    Contexto:
+        En ``u = e; if (c) { ... u ... }`` el valor se calcula siempre aunque solo se use si ``c`` es
+        verdadera; escribir ``if (c) { u = e; ... }`` lo calcula solo bajo la guarda y cambia la vida de
+        ``u`` y el orden de planificacion. Si ``u`` se usa en la propia condicion con la forma
+        ``g && resto``, la asignacion pasa a ``if (g) u = e;`` y la condicion original queda intacta
+        (``g`` se evalua dos veces y por eso debe ser pura), con lo que el cortocircuito se conserva.
+        La asignacion debe ir justo antes del ``if``, ``u`` no puede usarse en la rama ``else`` ni fuera
+        del ``if``, ``e`` no puede tener efectos ni leer algo que la condicion escriba. La local queda sin
+        inicializar en los caminos donde no se lee, lo que es correcto en C89 (solo es un error leerla antes
+        de asignarla, y ningun camino lo hace).
+
+    Args:
+        ctx (Contexto): Contexto de la ronda.
+
+    Returns:
+        str | None: Descripcion, o ``None`` si ninguna asignacion cumple las condiciones.
+
+    Ejemplo:
+        descripcion = leer_bajo_la_guarda(contexto)
+    """
+    elegida = _elegir(ctx.azar, _lecturas_bajo_la_guarda(ctx))
+    return None if elegida is None else elegida()
+
+
+# ---------------------------------------------------------------------------------------------------
 # Orquestacion
 # ---------------------------------------------------------------------------------------------------
 
@@ -4561,6 +5034,9 @@ MUTACIONES: tuple[tuple[str, Mutacion, float], ...] = (
     ("ancho_de_variable_de_retorno", ancho_de_variable_de_retorno, 1.0),
     ("limite_en_local_antes_del_incremento", limite_en_local_antes_del_incremento, 1.0),
     ("copia_local_por_rama", copia_local_por_rama, 1.0),
+    ("acceso_por_desplazamiento", acceso_por_desplazamiento, 1.5),
+    ("almacen_directo_en_cada_rama", almacen_directo_en_cada_rama, 1.5),
+    ("leer_bajo_la_guarda", leer_bajo_la_guarda, 1.5),
 )
 INTENTOS_POR_MUTACION = 12
 MAX_VECINOS_POR_MUTACION = 5000

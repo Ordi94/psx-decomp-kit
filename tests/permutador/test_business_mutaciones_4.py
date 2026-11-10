@@ -940,4 +940,4 @@ def test_el_registro_incluye_las_mutaciones_nuevas_con_peso_positivo() -> None:
         "copia_local_por_rama",
     )
     assert all(registradas[nombre] > 0 for nombre in nuevas)
-    assert len(registradas) == len(mut.MUTACIONES) == 40
+    assert len(registradas) == len(mut.MUTACIONES) == 43

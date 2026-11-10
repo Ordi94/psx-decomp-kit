@@ -54,6 +54,10 @@ _PALABRAS_QUE_NO_SON_TIPO = frozenset(
     {"return", "goto", "break", "continue", "else", "case", "default", "typedef", "if", "while", "for", "do"}
 )
 _PATRON_LITERAL = re.compile(r"^(0[xX][0-9a-fA-F]+|\d+)([uUlL]*)$")
+_PATRON_DECLARADOR = re.compile(r"\s*(\**)\s*([A-Za-z_]\w*)\s*((?:\[\s*\w+\s*\]\s*)*)")
+_PATRON_DIMENSION = re.compile(r"\[\s*(\w+)\s*\]")
+TAMANO_DE_PUNTERO = 4
+ANCHOS_CON_DISPOSICION = frozenset({8, 16, 32})
 
 
 @dataclass(frozen=True)
@@ -198,6 +202,10 @@ class TablaTipos:
             desde la estructura que la contiene.
         alias_de_campos: Representante de cada campo que comparte almacenamiento con otro de una
             union. Dos campos con el mismo representante son la misma memoria.
+        disposicion: Desplazamiento en bytes de cada campo por nombre de estructura, solo para los
+            campos cuya posicion se puede afirmar (alineacion natural, sin campos de bits, sin
+            estructuras anidadas ni tipos de tamano desconocido antes de ellos); un campo que falta
+            tiene posicion desconocida y nunca se inventa.
     """
 
     campos: dict[str, Tipo | None] = field(default_factory=dict)
@@ -207,6 +215,7 @@ class TablaTipos:
     uniones: dict[str, frozenset[str]] = field(default_factory=dict)
     grupos_anonimos: list[frozenset[str]] = field(default_factory=list)
     alias_de_campos: dict[str, str] = field(default_factory=dict)
+    disposicion: dict[str, dict[str, int]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -347,6 +356,80 @@ def _campos_de(cuerpo: str) -> dict[str, Tipo]:
     return campos
 
 
+def tamano_de_tipo(base: str, estrellas: int = 0) -> int | None:
+    """
+    Da el tamano en bytes de un tipo escalar del proyecto (enteros de 8, 16 y 32 bits y punteros).
+
+    Contexto:
+        Base de la disposicion de las estructuras y del desplazamiento de ``p[i]``. Todo lo demas
+        (estructuras, ``union``, 64 bits, nombres de tipo que el kit no conoce) tiene tamano desconocido
+        y quien lo pida debe abstenerse en lugar de suponer uno.
+
+    Args:
+        base (str): Texto del tipo sin asteriscos.
+        estrellas (int, opcional): Niveles de puntero.
+
+    Returns:
+        int | None: Bytes que ocupa, o ``None`` si no se conoce.
+
+    Ejemplo:
+        tamano = tamano_de_tipo("s16")
+    """
+    if estrellas:
+        return TAMANO_DE_PUNTERO
+    tipo = parsear_tipo(base)
+    if tipo.es_entero and tipo.ancho in ANCHOS_CON_DISPOSICION:
+        return tipo.ancho // 8
+    return None
+
+
+def _medidas_de_declaracion(declaracion: str) -> list[tuple[str, int, int]] | None:
+    """(nombre, tamano del elemento, cantidad de elementos) de cada campo de una declaracion, o ``None``."""
+    encontrado = _PATRON_CAMPO.match(declaracion)
+    if (
+        encontrado is None
+        or ":" in declaracion
+        or encontrado.group(1).split()[0] in _PALABRAS_QUE_NO_SON_TIPO
+    ):
+        return None
+    medidas: list[tuple[str, int, int]] = []
+    for trozo in f"{encontrado.group(2)}{encontrado.group(3)}".split(","):
+        declarador = _PATRON_DECLARADOR.fullmatch(trozo)
+        if declarador is None:
+            return None
+        tamano = tamano_de_tipo(encontrado.group(1), len(declarador.group(1)))
+        dimensiones = _PATRON_DIMENSION.findall(declarador.group(3))
+        if tamano is None or not all(d.isdigit() for d in dimensiones):
+            return None
+        cantidad = 1
+        for dimension in dimensiones:
+            cantidad *= int(dimension)
+        medidas.append((declarador.group(2), tamano, cantidad))
+    return medidas
+
+
+def _desplazamientos_de(cuerpo: str) -> dict[str, int]:
+    """
+    Desplazamiento de cada campo de una ``struct`` con alineacion natural, hasta el primero sin medida.
+
+    Un campo de bits, una estructura anidada, un puntero a funcion, un tipo de tamano desconocido o una
+    dimension que no es un literal detienen el calculo: los campos siguientes quedan sin desplazamiento.
+    """
+    desplazamientos: dict[str, int] = {}
+    siguiente = 0
+    for declaracion in cuerpo.split(";"):
+        if not declaracion.strip():
+            continue
+        medidas = _medidas_de_declaracion(declaracion)
+        if medidas is None:
+            break
+        for nombre, tamano, cantidad in medidas:
+            siguiente = -(-siguiente // tamano) * tamano
+            desplazamientos[nombre] = siguiente
+            siguiente += tamano * cantidad
+    return desplazamientos
+
+
 def construir_tabla(textos: Iterable[str]) -> TablaTipos:
     """
     Recoge de los textos de las cabeceras y del archivo los tipos de campos y globales.
@@ -369,6 +452,7 @@ def construir_tabla(textos: Iterable[str]) -> TablaTipos:
     tabla = TablaTipos()
     nombres: set[str] = set()
     vistos: dict[str, set[Tipo | None]] = {}
+    discrepantes: set[str] = set()
     for texto in textos:
         limpio = c.enmascarar(texto)
         nombres.update(nombres_de_typedef(limpio))
@@ -381,8 +465,11 @@ def construir_tabla(textos: Iterable[str]) -> TablaTipos:
                 vistos.setdefault(nombre, set()).add(None if arreglo or not escalar.es_escalar else escalar)
         for agregado in _estructuras_de(limpio):
             campos = _campos_de(agregado.cuerpo)
+            disposicion = {} if agregado.es_union else _desplazamientos_de(agregado.cuerpo)
             for nombre_de_estructura in agregado.nombres:
                 tabla.estructuras.setdefault(nombre_de_estructura, {}).update(campos)
+                if tabla.disposicion.setdefault(nombre_de_estructura, disposicion) != disposicion:
+                    discrepantes.add(nombre_de_estructura)
             if agregado.es_union and len(campos) > 1:
                 miembros = frozenset(campos)
                 if not agregado.nombres:
@@ -397,6 +484,7 @@ def construir_tabla(textos: Iterable[str]) -> TablaTipos:
     tabla.campos = {
         nombre: (next(iter(tipos)) if len(tipos) == 1 else None) for nombre, tipos in vistos.items()
     }
+    tabla.disposicion = {n: d for n, d in tabla.disposicion.items() if n not in discrepantes}
     tabla.nombres_de_tipo = frozenset(nombres)
     tabla.alias_de_campos = _fusionar_grupos([*tabla.uniones.values(), *tabla.grupos_anonimos])
     return tabla
