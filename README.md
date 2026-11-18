@@ -17,7 +17,7 @@ Un paquete Python, `psxdecomp`, con las piezas genericas de un proyecto de desco
 - instalacion verificada del toolchain externo (SDK, binutils, `maspsx`, `asm-differ`);
 - cargador y validador del manifiesto `psxdecomp.toml`, unica fuente de todo lo que depende del proyecto.
 
-Version 0.3.1, Python 3.13 o superior, licencia MIT.
+Version 0.3.2, Python 3.13 o superior, licencia MIT.
 
 ## Que no es
 
@@ -409,9 +409,10 @@ ejecutables, rutas ni convenciones de ningun juego.
 ### Mutaciones
 
 `permutador.mutaciones.MUTACIONES` registra cada reformulacion con su nombre y su peso en el sorteo. Todas
-conservan el significado del C, se aplican sobre una copia del arbol y se descartan si no son seguras en el
-sitio elegido (devuelven `None`). `mutaciones.vecinos` recorre el vecindario completo de una mutacion antes
-de que la busqueda sortee.
+conservan el significado del C salvo dos cambios de forma declarados (`signo_de_la_comparacion` y la tercera
+forma de `recorte_de_bits_altos`: ver "Cambios de forma"); se aplican sobre una copia del arbol y se descartan
+si no son seguras en el sitio elegido (devuelven `None`). `mutaciones.vecinos` recorre el vecindario completo
+de una mutacion antes de que la busqueda sortee.
 
 | Mutacion | Peso | Reformulacion |
 |---|---|---|
@@ -458,10 +459,44 @@ de que la busqueda sortee.
 | `acceso_por_desplazamiento` | 1,5 | Pasa `p->c`, `(*p).c` y `p[i]` (`i` constante) a `*(T*)((u8*)p + D)`, solo si se conoce el desplazamiento `D`: ver "Acceso por desplazamiento". |
 | `almacen_directo_en_cada_rama` | 1,5 | Quita la variable que une las dos ramas de un `if/else` y solo alimenta un almacen (`o->c = A;` en una rama y `o->c = B;` en la otra), o la introduce. |
 | `leer_bajo_la_guarda` | 1,5 | Mueve `u = e;` bajo la guarda del `if` que sigue y es el unico que usa `u`: al cuerpo, o a un `if (g)` propio si la condicion es `g && resto`. |
+| `signo_de_la_comparacion` | 1,0 | Anade `(s32)` o `(u32)` al operando de 32 bits de una comparacion relacional con una constante no negativa menor que 32768 en una condicion de control, o lo quita: fija `slti` o `sltiu`. Cambio de forma: ver "Cambios de forma". |
+| `reagrupar_suma` | 1,0 | Alterna `(a + b) + c`, `a + (b + c)` y `(a + c) + b` en sumas sin efectos de enteros o con un unico puntero fuera del parentesis interior. |
+| `recorte_de_bits_altos` | 1,0 | Alterna `(E << k) >> k` y `E & M` (`M = 0xFFFFFFFF >> k`) solo con `E` sin signo de 32 bits, y el molde `(s32)`/`(u32)` de `E` dentro del doble desplazamiento (cambio de forma). |
+| `bucle_do_while_y_while` | 1,0 | Pasa `if (g) { do { C } while (g); }` a `while (g) { C }` y la inversa, con `g` sin efectos. |
+| `quitar_variable_intermedia_en_ramas` | 1,0 | Escribe en cada rama de un `if/else` la expresion de una local `t = A * B;` que solo usan las dos ramas, una vez cada una, y quita la local. |
+| `guardar_lectura_antes_del_almacen` | 1,5 | Lee una global, un campo o `*p` en una local (existente, libre y del mismo tipo, o nueva) justo antes de un almacen intermedio que no puede escribirlo, y usa la copia despues. |
+
+Las alternativas `x = x + e;` a `x += e;` y los lados de una comparacion conmutados con el operador reflejado ya
+los cubren `asignacion_compuesta` y `operandos_conmutados`.
 
 Las mutaciones que razonan sobre el valor de una variable en un punto usan el seguimiento de copias vigentes
 de un bloque: solo copias directas entre variables seguras (sin la direccion tomada ni nombre ambiguo) del
 mismo tipo escalar, que cualquier escritura posterior, etiqueta o salto anula.
+
+### Regla de descarte: operacion partida en dos sentencias
+
+Ademas del filtro de construcciones prohibidas, la busqueda descarta sin compilarla toda variante que tenga
+mas operaciones partidas en dos sentencias que el C de partida. Un par `v = E1;` seguido de `v = F(v);` sobre
+la misma variable local o parametro (identificador simple), donde la segunda sentencia lee `v` y no lee
+ninguna otra variable (solo constantes, sin desreferencias ni llamadas), por ejemplo `v = a << 8; v = v >> 8;`
+o `v = p + 4; v = v & 3;`, no es otra forma de escribir el programa: una operacion que cabia en una sola
+sentencia se ha partido para repartir de otro modo los registros, y el buscador no debe proponerlo. Una
+asignacion compuesta (`v += k;`) tras `v = E1;` cuenta igual. `v = E1; v = v->campo;` no cuenta: hay un acceso
+a memoria entre medias.
+
+La comparacion es contra el C de partida (`mutaciones.contar_operaciones_partidas`): los pares que ya estaban
+no descartan, pero ninguna mutacion puede crear uno nuevo (`dividir_asignacion` puede producirlo con
+constantes: la regla lo rechaza). El resumen de `permutar` cuenta estas variantes en `descartadas` con el
+motivo `operacion_partida_en_dos_sentencias`, aparte de `regla` (construcciones prohibidas) y `evaluacion`.
+
+### Cambios de forma
+
+`signo_de_la_comparacion` y la forma de `recorte_de_bits_altos` que alterna `((s32)E << k) >> k` con
+`((u32)E << k) >> k` no son equivalencias: el molde cambia la semantica para los valores con el bit alto
+activo (comparacion con signo o sin el, desplazamiento aritmetico o logico). Se proponen porque cambian la
+instruccion que elige el compilador y solo se aceptan cuando el evaluador, que juzga la salida del compilador,
+da la variante por buena; la comparacion con el original por ensamblador es lo que decide, y quien aplique
+el resultado debe comprobar que los valores del programa no llegan al bit alto.
 
 ### Acceso por desplazamiento
 

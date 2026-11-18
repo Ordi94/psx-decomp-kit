@@ -2,6 +2,32 @@
 
 El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y el versionado es semantico.
 
+## [0.3.2] - 2026-11-17
+
+### Anadido
+
+- Regla de descarte `operacion_partida_en_dos_sentencias`: la busqueda descarta, sin compilarla, la variante
+  que tiene mas pares `v = E; v = F(v);` (o `v = E; v op= k;`) sobre una misma local o parametro que el C de
+  partida. Una operacion partida en dos sentencias no es otra forma de escribir el programa sino un ajuste al
+  reparto de registros. No cuentan las segundas sentencias con otra variable, una desreferencia o una llamada.
+  El resumen de `permutar` cuenta estas variantes aparte en `descartadas`.
+- `signo_de_la_comparacion`: anade o quita un molde `(s32)` o `(u32)` en el operando de 32 bits de una
+  comparacion relacional con una constante no negativa menor que 32768, en una condicion de control; es un
+  cambio de forma que solo acepta el evaluador.
+- `reagrupar_suma`: alterna `(a + b) + c`, `a + (b + c)` y `(a + c) + b` en sumas sin efectos, con a lo sumo
+  un puntero y siempre fuera del parentesis interior.
+- `recorte_de_bits_altos`: alterna `(E << k) >> k` y `E & M` solo con `E` sin signo de 32 bits, y el molde de
+  signo dentro del doble desplazamiento como cambio de forma declarado.
+- `bucle_do_while_y_while`: pasa `if (g) { do { C } while (g); }` a `while (g) { C }` y la inversa, con `g` sin
+  efectos.
+- `quitar_variable_intermedia_en_ramas`: escribe en cada rama de un `if/else` la expresion de la local que solo
+  usan las dos ramas, una vez cada una, y quita la local.
+- `guardar_lectura_antes_del_almacen`: guarda la lectura de una global, un campo o `*p` en una local libre
+  existente del mismo tipo (o nueva) antes de un almacen intermedio que no puede escribirla.
+- Pruebas de integracion que comprueban que las seis mutaciones estan registradas con su peso, que el barrido
+  de vecinos y la busqueda las intentan, y que la busqueda no mide ninguna variante con una operacion nueva
+  partida en dos sentencias.
+
 ## [0.3.1] - 2026-11-10
 
 ### Anadido

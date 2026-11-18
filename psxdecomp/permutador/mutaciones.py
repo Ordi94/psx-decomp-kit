@@ -4994,7 +4994,7 @@ def leer_bajo_la_guarda(ctx: Contexto) -> str | None:
 
 OPERADORES_RELACIONALES = frozenset({"<", "<=", ">", ">="})
 MOLDES_DE_32_BITS = ("s32", "u32")
-LIMITE_DE_CONSTANTE_DE_SIGNO = 0x8000
+LIMITE_DE_CONSTANTE_DE_SIGNO = 1 << 15
 ACCION_QUITAR_MOLDE = "quitar"
 MASCARA_DE_32_BITS = 0xFFFFFFFF
 DESPLAZAMIENTO_MINIMO = 1
@@ -5060,10 +5060,10 @@ def signo_de_la_comparacion(ctx: Contexto) -> str | None:
         ``slti``, y al reves. Fija la instruccion sin cambiar el tipo de la variable, que otros usos de
         la funcion pueden exigir sin signo. Se aplica a las comparaciones relacionales (``< <= > >=``) de
         la condicion de un ``if``, ``while``, ``do`` o ``for``, solo si el otro lado es una constante
-        entera no negativa menor que 0x8000 y el operando variable es un entero de 32 bits.
+        entera no negativa menor que 32768 y el operando variable es un entero de 32 bits.
 
         Es un cambio de forma, no una equivalencia: el molde cambia el resultado para los valores con el
-        bit alto activo (un contador que llegara a 0x80000000 se compararia como negativo). Por eso el
+        bit alto activo (un contador que llegara a 2^31 se compararia como negativo). Por eso el
         resultado solo se acepta cuando el evaluador, que juzga la salida del compilador, lo da por
         bueno; la variante nunca se adopta por ser equivalente en teoria.
 

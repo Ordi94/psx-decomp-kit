@@ -1,4 +1,4 @@
-"""Integracion: las mutaciones de 0.3.0 y 0.3.1 estan registradas con su peso y el buscador las intenta."""
+"""Integracion: las mutaciones de 0.3.0 a 0.3.2 estan registradas con su peso y el buscador las intenta."""
 
 from pathlib import Path
 

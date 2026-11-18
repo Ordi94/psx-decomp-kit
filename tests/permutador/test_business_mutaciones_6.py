@@ -55,7 +55,7 @@ def test_una_comparacion_dentro_de_una_condicion_compuesta_tambien_se_considera(
 
 
 def test_el_molde_no_se_aplica_si_la_constante_llega_al_umbral_o_es_negativa() -> None:
-    sin_cambio(mut.signo_de_la_comparacion, con_firma("if (x < 0x8000) {", "    D_global = 1;", "}"))
+    sin_cambio(mut.signo_de_la_comparacion, con_firma("if (x < 32768) {", "    D_global = 1;", "}"))
     sin_cambio(mut.signo_de_la_comparacion, con_firma("if (x < -1) {", "    D_global = 1;", "}"))
 
 
@@ -580,3 +580,28 @@ def test_la_lectura_que_se_guarda_no_crea_una_operacion_partida() -> None:
     funcion_base = cuerpo("q->clave = 4;", "D_global = D_otra;")
     _, resultado = aplicar(mut.guardar_lectura_antes_del_almacen, funcion_base)
     assert resultado.count("tmp1") == 3
+
+
+# --- entregables que las mutaciones existentes ya cubren --------------------------------------------------
+
+
+def test_la_asignacion_compuesta_existente_cubre_la_forma_x_igual_x_mas_e_y_su_inversa() -> None:
+    resultados = todas_las_variantes(mut.asignacion_compuesta, cuerpo("p->valor = p->valor + a;"))
+    assert resultados == {cuerpo("p->valor += a;")}
+    resultados = todas_las_variantes(mut.asignacion_compuesta, cuerpo("p->valor += a;"))
+    assert resultados == {cuerpo("p->valor = p->valor + a;")}
+    resultados = todas_las_variantes(mut.asignacion_compuesta, cuerpo("a = b | a;"))
+    assert resultados == {cuerpo("a |= b;")}
+    sin_cambio(mut.asignacion_compuesta, cuerpo("a = a + g(b);"))
+
+
+def test_operandos_conmutados_existente_cubre_la_comparacion_con_el_operador_reflejado() -> None:
+    resultados = todas_las_variantes(
+        mut.operandos_conmutados, cuerpo("if (a <= b) {", "    D_global = 1;", "}")
+    )
+    assert resultados == {cuerpo("if (b >= a) {", "    D_global = 1;", "}")}
+    resultados = todas_las_variantes(
+        mut.operandos_conmutados, cuerpo("if (a == b) {", "    D_global = 1;", "}")
+    )
+    assert resultados == {cuerpo("if (b == a) {", "    D_global = 1;", "}")}
+    sin_cambio(mut.operandos_conmutados, cuerpo("if (a < g(b)) {", "    D_global = 1;", "}"))
