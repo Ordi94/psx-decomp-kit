@@ -5139,6 +5139,120 @@ def vecinos(base: c.Funcion, tabla: an.TablaTipos) -> Iterator[tuple[c.Funcion, 
                     break
 
 
+MOTIVO_PROHIBIDO = "regla"
+MOTIVO_OPERACION_PARTIDA = "operacion_partida_en_dos_sentencias"
+MOTIVOS_DE_REGLA = frozenset({MOTIVO_PROHIBIDO, MOTIVO_OPERACION_PARTIDA})
+OPERADORES_UNARIOS_ARITMETICOS = frozenset({"-", "+", "~", "!"})
+
+
+def _solo_la_variable_y_constantes(expr: c.Expr, nombre: str) -> bool:
+    """
+    Indica si una expresion solo combina la variable dada y literales, sin memoria ni efectos.
+
+    Contexto:
+        Condicion de la regla de la operacion partida: la segunda sentencia del par no puede leer otra
+        variable (entonces seria un calculo distinto, no la continuacion del primero), ni desreferenciar
+        (un acceso a memoria entre medias), ni llamar a nada.
+
+    Args:
+        expr (c.Expr): Expresion de la segunda sentencia.
+        nombre (str): Variable que ambas sentencias escriben.
+
+    Returns:
+        bool: Verdadero si todos los nodos son la variable, literales, operadores binarios, unarios
+        aritmeticos (``- + ~ !``) o moldes.
+
+    Ejemplo:
+        solo = _solo_la_variable_y_constantes(c.Binario(">>", c.Id("v"), c.Num("8")), "v")
+    """
+    for nodo in c.recorrer(expr):
+        if isinstance(nodo, c.Id):
+            if nodo.nombre != nombre:
+                return False
+        elif isinstance(nodo, c.Unario):
+            if nodo.op not in OPERADORES_UNARIOS_ARITMETICOS:
+                return False
+        elif not isinstance(nodo, c.Num | c.Binario | c.Conversion):
+            return False
+    return True
+
+
+def _es_continuacion_de_la_operacion(primera: c.Sentencia, segunda: c.Sentencia, locales: set[str]) -> bool:
+    """La segunda sentencia termina, sobre la misma variable local, la operacion que empezo la primera."""
+    if not (isinstance(primera, c.Expresion) and isinstance(segunda, c.Expresion)):
+        return False
+    inicial, final = primera.expr, segunda.expr
+    if not (
+        isinstance(inicial, c.Asigna)
+        and inicial.op == "="
+        and isinstance(inicial.destino, c.Id)
+        and inicial.destino.nombre in locales
+        and isinstance(final, c.Asigna)
+        and _es_id(final.destino, inicial.destino.nombre)
+    ):
+        return False
+    nombre = inicial.destino.nombre
+    if final.op == "=" and nombre not in an.identificadores_de(final.valor):
+        return False
+    return _solo_la_variable_y_constantes(final.valor, nombre)
+
+
+def contar_operaciones_partidas(funcion: c.Funcion) -> int:
+    """
+    Cuenta las operaciones que la funcion escribe partidas en dos sentencias consecutivas.
+
+    Contexto:
+        Base de la regla de descarte ``operacion_partida_en_dos_sentencias``. Una operacion partida
+        (``v = a << 8; v = v >> 8;``, ``v = p + 4; v += 3;``) no es otra forma de escribir el programa: es
+        un ajuste al reparto de registros, y el buscador no debe proponerla. El par se reconoce solo
+        sobre una variable local o un parametro (identificador simple): la segunda sentencia lee la
+        variable y no lee ninguna otra, ni desreferencia, ni llama a nada (``v = v->sig;`` queda fuera:
+        hay un acceso a memoria entre medias). Una compuesta (``v += k;``) tras ``v = E;`` cuenta como la
+        misma particion.
+
+    Args:
+        funcion (c.Funcion): Funcion que se analiza.
+
+    Returns:
+        int: Cantidad de pares de sentencias consecutivas de un mismo bloque.
+
+    Ejemplo:
+        partidas = contar_operaciones_partidas(funcion)
+    """
+    locales = {p.nombre for p in funcion.parametros}
+    bloques = list(c.todos_los_bloques(funcion.cuerpo))
+    locales |= {s.nombre for bloque in bloques for s in bloque.items if isinstance(s, c.Decl)}
+    return sum(
+        _es_continuacion_de_la_operacion(primera, segunda, locales)
+        for bloque in bloques
+        for primera, segunda in itertools.pairwise(bloque.items)
+    )
+
+
+def motivo_de_descarte_nuevo(variante: c.Funcion, partidas_base: int) -> str | None:
+    """
+    Da el motivo por el que el arbol de una variante se descarta por regla, o ``None`` si se mide.
+
+    Contexto:
+        Filtro del motor tras el de las construcciones prohibidas: se compara contra el C de partida, de
+        modo que los pares que ya estaban no descartan, pero ninguna mutacion puede crear uno nuevo.
+
+    Args:
+        variante (c.Funcion): Arbol de la variante.
+        partidas_base (int): Operaciones partidas del C de partida (``contar_operaciones_partidas``).
+
+    Returns:
+        str | None: ``MOTIVO_OPERACION_PARTIDA`` si la variante tiene mas operaciones partidas que el
+        C de partida; ``None`` en otro caso.
+
+    Ejemplo:
+        motivo = motivo_de_descarte_nuevo(variante, contar_operaciones_partidas(base))
+    """
+    if contar_operaciones_partidas(variante) > partidas_base:
+        return MOTIVO_OPERACION_PARTIDA
+    return None
+
+
 def contar_prohibidos(texto: str) -> list[int]:
     """
     Cuenta las apariciones de cada construccion que el proyecto no admite como estado final.

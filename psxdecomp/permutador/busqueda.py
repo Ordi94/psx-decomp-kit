@@ -215,6 +215,7 @@ class Busqueda:
         self.ejes_mejor = ejes_partida
         self.base = base
         self.envolturas_base = mut.contar_envolturas(base)
+        self.partidas_base = mut.contar_operaciones_partidas(base)
         self.texto_base = c.imprimir_funcion(base)
         self.tabla = tabla
         self.evaluador = evaluador
@@ -280,10 +281,14 @@ class Busqueda:
         """Aplica el filtro de reglas y mide las variantes permitidas en paralelo."""
         pendientes: list[_Variante] = []
         for variante in variantes:
-            if mut.variante_permitida(variante.texto, self.texto_base):
+            if not mut.variante_permitida(variante.texto, self.texto_base):
+                variante.resultado = ResultadoEvaluacion(None, mut.MOTIVO_PROHIBIDO)
+                continue
+            motivo = mut.motivo_de_descarte_nuevo(variante.arbol, self.partidas_base)
+            if motivo is None:
                 pendientes.append(variante)
             else:
-                variante.resultado = ResultadoEvaluacion(None, "regla")
+                variante.resultado = ResultadoEvaluacion(None, motivo)
         umbral = self.estado.puntuacion_actual
         medidas = pool.map(lambda v: self.evaluador(v.texto, umbral), pendientes)
         for variante, resultado in zip(pendientes, medidas, strict=True):
@@ -351,7 +356,8 @@ class Busqueda:
         ]
         for variante in variantes:
             if variante.resultado and variante.resultado.puntuacion is None:
-                self.descartadas["regla" if variante.resultado.motivo == "regla" else "evaluacion"] += 1
+                motivo = variante.resultado.motivo
+                self.descartadas[motivo if motivo in mut.MOTIVOS_DE_REGLA else "evaluacion"] += 1
         if not medidas:
             self.estado.rondas_sin_mejora += 1
             return False
