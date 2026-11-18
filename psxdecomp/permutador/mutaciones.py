@@ -4989,6 +4989,639 @@ def leer_bajo_la_guarda(ctx: Contexto) -> str | None:
 
 
 # ---------------------------------------------------------------------------------------------------
+# Expresiones: signo de la comparacion, sumas reagrupadas y recorte de bits altos
+# ---------------------------------------------------------------------------------------------------
+
+OPERADORES_RELACIONALES = frozenset({"<", "<=", ">", ">="})
+MOLDES_DE_32_BITS = ("s32", "u32")
+LIMITE_DE_CONSTANTE_DE_SIGNO = 0x8000
+ACCION_QUITAR_MOLDE = "quitar"
+MASCARA_DE_32_BITS = 0xFFFFFFFF
+DESPLAZAMIENTO_MINIMO = 1
+DESPLAZAMIENTO_MAXIMO = 31
+
+
+def _condiciones_de_control(ctx: Contexto) -> Iterator[tuple[c.Sentencia, c.Expr]]:
+    """Condicion de cada ``if``, ``while``, ``do`` y ``for`` de la funcion con su sentencia."""
+    for _, _, sentencia in _sentencias(ctx.funcion):
+        if isinstance(sentencia, c.Si | c.Mientras | c.HacerMientras | c.Para) and sentencia.cond is not None:
+            yield sentencia, sentencia.cond
+
+
+def _acciones_de_signo(ctx: Contexto, operando: c.Expr) -> list[str]:
+    """Moldes que se pueden anadir al operando de una comparacion, o quitar si ya lleva uno."""
+    if _constante_entera(operando) is not None:
+        return []
+    if isinstance(operando, c.Conversion):
+        interior = ctx.entorno.inferir(operando.operando)
+        quitable = (
+            operando.tipo in MOLDES_DE_32_BITS
+            and interior is not None
+            and interior.es_entero
+            and interior.ancho == 32
+        )
+        return [ACCION_QUITAR_MOLDE] if quitable else []
+    tipo = ctx.entorno.inferir(operando)
+    if tipo is None or not tipo.es_entero or tipo.ancho != 32:
+        return []
+    return ["u32" if tipo.con_signo else "s32"]
+
+
+def _moldes_de_signo_posibles(ctx: Contexto) -> list[tuple[c.Binario, bool, str]]:
+    """
+    Comparaciones de una condicion con una constante pequena, con el lado variable y el molde a aplicar.
+
+    El operando variable es un entero de 32 bits y el otro lado una constante no negativa menor que
+    ``LIMITE_DE_CONSTANTE_DE_SIGNO``: con ella el compilador elige ``slti`` o ``sltiu`` segun el signo.
+    """
+    posibles: list[tuple[c.Binario, bool, str]] = []
+    for sentencia, condicion in _condiciones_de_control(ctx):
+        for sitio in sitios_de(condicion, sentencia):
+            nodo = sitio.nodo
+            if not (isinstance(nodo, c.Binario) and nodo.op in OPERADORES_RELACIONALES):
+                continue
+            for variable_a_la_izquierda, constante in ((True, nodo.der), (False, nodo.izq)):
+                valor = _constante_entera(constante)
+                if valor is None or not 0 <= valor < LIMITE_DE_CONSTANTE_DE_SIGNO:
+                    continue
+                operando = nodo.izq if variable_a_la_izquierda else nodo.der
+                posibles.extend(
+                    (nodo, variable_a_la_izquierda, accion) for accion in _acciones_de_signo(ctx, operando)
+                )
+    return posibles
+
+
+def signo_de_la_comparacion(ctx: Contexto) -> str | None:
+    """
+    Anade un molde ``(s32)`` o ``(u32)`` al operando de una comparacion con una constante, o lo quita.
+
+    Contexto:
+        Con el operando sin signo el compilador compara con ``sltiu``; con un molde ``(s32)`` usa
+        ``slti``, y al reves. Fija la instruccion sin cambiar el tipo de la variable, que otros usos de
+        la funcion pueden exigir sin signo. Se aplica a las comparaciones relacionales (``< <= > >=``) de
+        la condicion de un ``if``, ``while``, ``do`` o ``for``, solo si el otro lado es una constante
+        entera no negativa menor que 0x8000 y el operando variable es un entero de 32 bits.
+
+        Es un cambio de forma, no una equivalencia: el molde cambia el resultado para los valores con el
+        bit alto activo (un contador que llegara a 0x80000000 se compararia como negativo). Por eso el
+        resultado solo se acepta cuando el evaluador, que juzga la salida del compilador, lo da por
+        bueno; la variante nunca se adopta por ser equivalente en teoria.
+
+    Args:
+        ctx (Contexto): Contexto de la ronda.
+
+    Returns:
+        str | None: Descripcion, o ``None`` si ninguna comparacion cumple las condiciones.
+
+    Ejemplo:
+        descripcion = signo_de_la_comparacion(contexto)
+    """
+    elegido = _elegir(ctx.azar, _moldes_de_signo_posibles(ctx))
+    if elegido is None:
+        return None
+    nodo, variable_a_la_izquierda, accion = elegido
+    antes = an.texto_de(nodo)
+    operando = nodo.izq if variable_a_la_izquierda else nodo.der
+    nuevo = (
+        operando.operando
+        if accion == ACCION_QUITAR_MOLDE and isinstance(operando, c.Conversion)
+        else (c.Conversion(accion, operando))
+    )
+    if variable_a_la_izquierda:
+        nodo.izq = nuevo
+    else:
+        nodo.der = nuevo
+    return f"signo_de_la_comparacion({antes}, {accion})"
+
+
+def _terna_de_suma(nodo: c.Binario) -> tuple[c.Expr, c.Expr, c.Expr, str] | None:
+    """Los tres sumandos de ``(x + y) + z`` o ``x + (y + z)`` y la forma en que estan agrupados."""
+    if nodo.op != "+":
+        return None
+    if isinstance(nodo.izq, c.Binario) and nodo.izq.op == "+":
+        return nodo.izq.izq, nodo.izq.der, nodo.der, "izquierda"
+    if isinstance(nodo.der, c.Binario) and nodo.der.op == "+":
+        return nodo.izq, nodo.der.izq, nodo.der.der, "derecha"
+    return None
+
+
+def _agrupaciones_de_suma(
+    ctx: Contexto, sumandos: tuple[c.Expr, c.Expr, c.Expr], forma: str
+) -> list[tuple[int, int, int]]:
+    """
+    Agrupaciones de tres sumandos distintas de la actual que son seguras: ``(interior, interior, fuera)``.
+
+    Los tres sumandos son enteros o punteros conocidos y a lo sumo uno es puntero; el puntero queda
+    fuera del parentesis interior (sumar dos enteros y despues el puntero equivale a sumarlos en el
+    otro orden, mientras que un parentesis interior con el puntero depende de la escala del tipo).
+    """
+    tipos = [ctx.entorno.inferir(sumando) for sumando in sumandos]
+    if any(tipo is None or not (tipo.es_entero or tipo.es_puntero) for tipo in tipos):
+        return []
+    punteros = [i for i, tipo in enumerate(tipos) if tipo is not None and tipo.es_puntero]
+    if len(punteros) > 1:
+        return []
+    agrupaciones = [(0, 1, 2), (1, 2, 0), (0, 2, 1)]
+    actual = (0, 1, 2) if forma == "izquierda" else (1, 2, 0)
+    return [
+        agrupacion
+        for agrupacion in agrupaciones
+        if agrupacion != actual and not (set(punteros) & set(agrupacion[:2]))
+    ]
+
+
+def _sumas_reagrupables(
+    ctx: Contexto,
+) -> list[tuple[c.Binario, tuple[c.Expr, c.Expr, c.Expr], tuple[int, int, int]]]:
+    """Sumas de tres sumandos sin efectos con cada agrupacion segura distinta de la que tienen."""
+    posibles: list[tuple[c.Binario, tuple[c.Expr, c.Expr, c.Expr], tuple[int, int, int]]] = []
+    for sentencia, raiz in _todas_las_expresiones(ctx.funcion):
+        for sitio in sitios_de(raiz, sentencia):
+            nodo = sitio.nodo
+            terna = _terna_de_suma(nodo) if isinstance(nodo, c.Binario) and not sitio.lvalue else None
+            if terna is None or not an.es_pura(nodo):
+                continue
+            sumandos = (terna[0], terna[1], terna[2])
+            assert isinstance(nodo, c.Binario)  # noqa: S101 - ``_terna_de_suma`` lo garantiza
+            posibles.extend(
+                (nodo, sumandos, agrupacion) for agrupacion in _agrupaciones_de_suma(ctx, sumandos, terna[3])
+            )
+    return posibles
+
+
+def reagrupar_suma(ctx: Contexto) -> str | None:
+    """
+    Cambia la agrupacion de una suma de tres terminos: ``(a + b) + c``, ``a + (b + c)`` o ``(a + c) + b``.
+
+    Contexto:
+        Cambia que sumas parciales se calculan primero y, con ellas, el reparto de registros y el orden
+        de las instrucciones. Solo se aplica a sumas sin efectos cuyos tres sumandos son enteros o
+        punteros de tipo conocido, con a lo sumo un puntero y siempre fuera del parentesis interior: la
+        suma entera es asociativa y conmutativa modulo 2^32, y sumar al puntero el total de los enteros
+        equivale a sumarle cada uno, asi que el valor no cambia.
+
+    Args:
+        ctx (Contexto): Contexto de la ronda.
+
+    Returns:
+        str | None: Descripcion, o ``None`` si ninguna suma cumple las condiciones.
+
+    Ejemplo:
+        descripcion = reagrupar_suma(contexto)
+    """
+    elegido = _elegir(ctx.azar, _sumas_reagrupables(ctx))
+    if elegido is None:
+        return None
+    nodo, sumandos, (primero, segundo, fuera) = elegido
+    antes = an.texto_de(nodo)
+    nodo.izq = c.Binario("+", sumandos[primero], sumandos[segundo])
+    nodo.der = sumandos[fuera]
+    if fuera == 0:
+        nodo.izq, nodo.der = nodo.der, nodo.izq
+    return f"reagrupar_suma({antes} -> {an.texto_de(nodo)})"
+
+
+FORMA_RECORTAR = "recortar"
+FORMA_AMPLIAR = "ampliar"
+FORMA_CAMBIAR_MOLDE = "cambiar_molde"
+
+
+def _es_de_32_bits_sin_signo(ctx: Contexto, expr: c.Expr) -> bool:
+    """La expresion es pura y de tipo entero de 32 bits sin signo conocido."""
+    tipo = ctx.entorno.inferir(expr)
+    return (
+        tipo is not None and tipo.es_entero and tipo.ancho == 32 and not tipo.con_signo and an.es_pura(expr)
+    )
+
+
+def _desplazamiento_doble(nodo: c.Binario) -> int | None:
+    """``k`` si el nodo es ``(E << k) >> k`` con la misma constante ``k`` en 1..31; ``None`` si no."""
+    if not (nodo.op == ">>" and isinstance(nodo.izq, c.Binario) and nodo.izq.op == "<<"):
+        return None
+    k = _constante_entera(nodo.der)
+    if k is None or k != _constante_entera(nodo.izq.der):
+        return None
+    return k if DESPLAZAMIENTO_MINIMO <= k <= DESPLAZAMIENTO_MAXIMO else None
+
+
+def _desplazamiento_de_mascara(valor: int | None) -> int | None:
+    """``k`` si ``valor`` es ``0xFFFFFFFF >> k`` con ``k`` en 1..31 (mascara de bits bajos), o ``None``."""
+    if valor is None or valor <= 0 or valor & (valor + 1) != 0:
+        return None
+    k = 32 - valor.bit_length()
+    return k if DESPLAZAMIENTO_MINIMO <= k <= DESPLAZAMIENTO_MAXIMO else None
+
+
+def _recortes_posibles(ctx: Contexto) -> list[tuple[c.Binario, str, int, bool]]:
+    """
+    Nodos que son un recorte de bits altos, con la forma a la que pasan, ``k`` y el lado de la mascara.
+
+    El ultimo elemento es verdadero si la mascara es el operando derecho (solo importa a la forma que
+    amplia ``E & M``).
+    """
+    posibles: list[tuple[c.Binario, str, int, bool]] = []
+    for sentencia, raiz in _todas_las_expresiones(ctx.funcion):
+        for sitio in sitios_de(raiz, sentencia):
+            nodo = sitio.nodo
+            if sitio.lvalue or not isinstance(nodo, c.Binario):
+                continue
+            k = _desplazamiento_doble(nodo)
+            if k is not None:
+                interior = nodo.izq
+                assert isinstance(interior, c.Binario)  # noqa: S101 - ``_desplazamiento_doble`` lo garantiza
+                if _es_de_32_bits_sin_signo(ctx, interior.izq):
+                    posibles.append((nodo, FORMA_RECORTAR, k, True))
+                if isinstance(interior.izq, c.Conversion) and interior.izq.tipo in MOLDES_DE_32_BITS:
+                    posibles.append((nodo, FORMA_CAMBIAR_MOLDE, k, True))
+            elif nodo.op == "&":
+                for mascara_a_la_derecha, mascara, otro in (
+                    (True, nodo.der, nodo.izq),
+                    (False, nodo.izq, nodo.der),
+                ):
+                    k = _desplazamiento_de_mascara(an.valor_de_literal(mascara))
+                    if k is not None and _es_de_32_bits_sin_signo(ctx, otro):
+                        posibles.append((nodo, FORMA_AMPLIAR, k, mascara_a_la_derecha))
+    return posibles
+
+
+def recorte_de_bits_altos(ctx: Contexto) -> str | None:
+    """
+    Alterna ``(E << k) >> k`` y ``E & M`` (con ``M = 0xFFFFFFFF >> k``) y el molde de signo del primero.
+
+    Contexto:
+        Borrar los bits altos de un valor se escribe con una mascara o con dos desplazamientos, y el
+        compilador genera instrucciones distintas (``andi``/``and`` frente a ``sll`` y ``srl``).
+        Con un operando sin signo de 32 bits las dos formas son la misma funcion, y asi se aplican;
+        con un operando con signo NO, porque el desplazamiento aritmetico a la derecha extiende el
+        signo. Nunca parte la operacion en dos sentencias.
+
+        La tercera forma, ``((s32)E << k) >> k`` frente a ``((u32)E << k) >> k``, es un cambio de forma
+        y no una equivalencia: cambia el desplazamiento a la derecha de aritmetico a logico, o al reves,
+        para los valores con el bit alto activo (con un molde estrecho por fuera, el truncamiento puede
+        absorber la diferencia). Solo se acepta si el evaluador, que juzga la salida del compilador, la
+        da por buena.
+
+    Args:
+        ctx (Contexto): Contexto de la ronda.
+
+    Returns:
+        str | None: Descripcion, o ``None`` si ninguna expresion cumple las condiciones.
+
+    Ejemplo:
+        descripcion = recorte_de_bits_altos(contexto)
+    """
+    elegido = _elegir(ctx.azar, _recortes_posibles(ctx))
+    if elegido is None:
+        return None
+    nodo, forma, k, mascara_a_la_derecha = elegido
+    antes = an.texto_de(nodo)
+    if forma == FORMA_RECORTAR:
+        interior = nodo.izq
+        assert isinstance(interior, c.Binario)  # noqa: S101
+        nodo.op, nodo.izq, nodo.der = "&", interior.izq, c.Num(f"0x{MASCARA_DE_32_BITS >> k:X}")
+    elif forma == FORMA_AMPLIAR:
+        valor = nodo.izq if mascara_a_la_derecha else nodo.der
+        nodo.op, nodo.izq, nodo.der = ">>", c.Binario("<<", valor, c.Num(str(k))), c.Num(str(k))
+    else:
+        interior = nodo.izq
+        assert isinstance(interior, c.Binario) and isinstance(interior.izq, c.Conversion)  # noqa: S101
+        interior.izq.tipo = "u32" if interior.izq.tipo == "s32" else "s32"
+    return f"recorte_de_bits_altos({antes}, {forma})"
+
+
+# ---------------------------------------------------------------------------------------------------
+# Bucles: do-while con guarda y while
+# ---------------------------------------------------------------------------------------------------
+
+FORMA_A_MIENTRAS = "a_mientras"
+FORMA_A_GUARDA = "a_guarda"
+
+
+def _bucles_convertibles(ctx: Contexto) -> list[tuple[c.Bloque, int, str]]:
+    """``if (g) { do { C } while (g); }`` y ``while (g) { C }`` con ``g`` sin efectos, con su forma."""
+    posibles: list[tuple[c.Bloque, int, str]] = []
+    for bloque, indice, sentencia in _sentencias(ctx.funcion):
+        if isinstance(sentencia, c.Si):
+            interior = sentencia.entonces.items
+            if (
+                sentencia.sino is None
+                and len(interior) == 1
+                and isinstance(interior[0], c.HacerMientras)
+                and not interior[0].comentarios
+                and not sentencia.entonces.finales
+                and an.es_pura(sentencia.cond)
+                and an.texto_de(sentencia.cond) == an.texto_de(interior[0].cond)
+            ):
+                posibles.append((bloque, indice, FORMA_A_MIENTRAS))
+        elif isinstance(sentencia, c.Mientras) and an.es_pura(sentencia.cond):
+            posibles.append((bloque, indice, FORMA_A_GUARDA))
+    return posibles
+
+
+def bucle_do_while_y_while(ctx: Contexto) -> str | None:
+    """
+    Pasa ``if (g) { do { C } while (g); }`` a ``while (g) { C }`` y la inversa.
+
+    Contexto:
+        Un ``do`` precedido de su propia guarda y un ``while`` son el mismo bucle, pero el compilador
+        los coloca distinto (el ``while`` prueba la condicion arriba y la repite abajo; el ``do`` con
+        guarda la prueba una vez fuera y otra al final). Solo se aplica con una condicion sin efectos:
+        se evalua el mismo numero de veces y en el mismo estado en las dos formas, y ``break`` y
+        ``continue`` conservan su significado (``continue`` salta a la prueba de la condicion en las dos).
+        Un ``do`` sin esa guarda inmediata no se toca: entra una vez aunque la condicion sea falsa.
+
+    Args:
+        ctx (Contexto): Contexto de la ronda.
+
+    Returns:
+        str | None: Descripcion, o ``None`` si ningun bucle cumple las condiciones.
+
+    Ejemplo:
+        descripcion = bucle_do_while_y_while(contexto)
+    """
+    elegido = _elegir(ctx.azar, _bucles_convertibles(ctx))
+    if elegido is None:
+        return None
+    bloque, indice, forma = elegido
+    sentencia = bloque.items[indice]
+    if forma == FORMA_A_MIENTRAS:
+        assert isinstance(sentencia, c.Si)  # noqa: S101
+        bucle = sentencia.entonces.items[0]
+        assert isinstance(bucle, c.HacerMientras)  # noqa: S101
+        bloque.items[indice] = c.Mientras(
+            cond=sentencia.cond, cuerpo=bucle.cuerpo, comentarios=sentencia.comentarios
+        )
+        return f"bucle_do_while_y_while({an.texto_de(sentencia.cond)}, {forma})"
+    assert isinstance(sentencia, c.Mientras)  # noqa: S101
+    repetido = c.HacerMientras(cuerpo=sentencia.cuerpo, cond=copy.deepcopy(sentencia.cond))
+    guarda = c.Si(cond=sentencia.cond, entonces=c.Bloque(items=[repetido]), comentarios=sentencia.comentarios)
+    bloque.items[indice] = guarda
+    return f"bucle_do_while_y_while({an.texto_de(sentencia.cond)}, {forma})"
+
+
+# ---------------------------------------------------------------------------------------------------
+# Locales: variable intermedia entre ramas y lectura guardada antes de un almacen
+# ---------------------------------------------------------------------------------------------------
+
+
+def _usos_de_una_rama(rama: c.Bloque, usos: list[tuple[c.Sentencia, Sitio]]) -> list[tuple[int, Sitio]]:
+    """Usos cuya sentencia es hija directa de la rama, con su posicion en ella."""
+    encontrados: list[tuple[int, Sitio]] = []
+    for sentencia, sitio in usos:
+        posicion = next((i for i, s in enumerate(rama.items) if s is sentencia), None)
+        if posicion is not None:
+            encontrados.append((posicion, sitio))
+    return encontrados
+
+
+def _uso_unico_en_rama(
+    ctx: Contexto, si: c.Si, rama: c.Bloque, usos: list[tuple[c.Sentencia, Sitio]], valor: c.Expr
+) -> Sitio | None:
+    """
+    El unico uso de la variable en la rama si se puede sustituir por su valor, o ``None``.
+
+    El uso es una lectura incondicional de una sentencia de expresion de la rama, y ni la condicion del
+    ``if`` ni las sentencias de la rama anteriores a ese uso escriben lo que el valor lee.
+    """
+    propios = _usos_de_una_rama(rama, usos)
+    if len(propios) != 1:
+        return None
+    posicion, sitio = propios[0]
+    sentencia = rama.items[posicion]
+    if (
+        sitio.lvalue
+        or sitio.perezoso
+        or not isinstance(sentencia, _SENTENCIAS_CON_EXPRESION_DE_USO)
+        or not all(_aparicion_unica_de_asignacion(raiz) for raiz in c.expresiones_de(sentencia))
+    ):
+        return None
+    lectura = an.efectos_de(c.Expresion(expr=valor), ctx.alias)
+    previas = [an.efectos_de(c.Expresion(expr=si.cond), ctx.alias)]
+    previas.extend(an.efectos_profundos(anterior, ctx.alias) for anterior in rama.items[:posicion])
+    return None if any(an.escritura_alcanza(efectos, lectura) for efectos in previas) else sitio
+
+
+def _variables_de_rama_quitables(ctx: Contexto) -> list[tuple[c.Bloque, int, str, list[Sitio]]]:
+    """
+    Locales ``t = e;`` seguidas de un ``if/else`` cuyas dos ramas la usan una vez cada una.
+
+    La local tiene una sola escritura y exactamente dos lecturas, una por rama; el valor es puro, no
+    menciona nombres ambiguos y conserva su valor en el tipo de la local.
+    """
+    ambiguos = nombres_ambiguos(ctx.funcion)
+    declaraciones = _declaraciones_simples(ctx)
+    candidatas: list[tuple[c.Bloque, int, str, list[Sitio]]] = []
+    for bloque, indice, sentencia in _sentencias(ctx.funcion):
+        asignacion = _asignacion_a_variable(sentencia)
+        siguiente = bloque.items[indice + 1] if indice + 1 < len(bloque.items) else None
+        if (
+            asignacion is None
+            or not isinstance(asignacion.destino, c.Id)
+            or asignacion.destino.nombre not in declaraciones
+            or not isinstance(siguiente, c.Si)
+            or siguiente.sino is None
+        ):
+            continue
+        nombre = asignacion.destino.nombre
+        declaracion = declaraciones[nombre][1]
+        usos = _usos_de(ctx.funcion, nombre)
+        origen = ctx.entorno.inferir(asignacion.valor)
+        destino = ctx.entorno.locales.get(nombre)
+        compatible = (
+            origen is not None
+            and destino is not None
+            and an.promover(origen) == an.promover(destino)
+            and (origen.texto == destino.texto or an.conserva_valor(origen, destino))
+        )
+        if (
+            declaracion.inicial is not None
+            or not compatible
+            or len(usos) != 3
+            or sum(1 for _, sitio in usos if sitio.lvalue) != 1
+            or not an.es_pura(asignacion.valor)
+            or an.identificadores_de(asignacion.valor) & ambiguos
+        ):
+            continue
+        lecturas = [(s, sitio) for s, sitio in usos if not sitio.lvalue]
+        entonces = _uso_unico_en_rama(ctx, siguiente, siguiente.entonces, lecturas, asignacion.valor)
+        sino = _uso_unico_en_rama(ctx, siguiente, siguiente.sino, lecturas, asignacion.valor)
+        if entonces is not None and sino is not None:
+            candidatas.append((bloque, indice, nombre, [entonces, sino]))
+    return candidatas
+
+
+def quitar_variable_intermedia_en_ramas(ctx: Contexto) -> str | None:
+    """
+    Escribe en cada rama de un ``if/else`` la expresion de una local que solo usan las dos ramas.
+
+    Contexto:
+        ``t = A * B; if (c) { x = t >> 11; } else { y = t >> 11; }`` pasa a calcular ``A * B`` dentro de
+        cada rama y la local desaparece: sin variable de usuario el producto es un temporal del
+        compilador y recibe otro registro. Cubre el caso que ``expandir_local`` no alcanza porque pide un
+        unico uso. Exige que el valor sea puro, que cada rama lo use una sola vez en una lectura
+        incondicional, y que ni la condicion ni nada de la rama anterior al uso escriba lo que el valor
+        lee, de modo que calcularlo mas tarde da el mismo resultado.
+
+    Args:
+        ctx (Contexto): Contexto de la ronda.
+
+    Returns:
+        str | None: Descripcion, o ``None`` si ninguna local cumple las condiciones.
+
+    Ejemplo:
+        descripcion = quitar_variable_intermedia_en_ramas(contexto)
+    """
+    elegido = _elegir(ctx.azar, _variables_de_rama_quitables(ctx))
+    if elegido is None:
+        return None
+    bloque, indice, nombre, sitios = elegido
+    asignacion = bloque.items[indice]
+    assert isinstance(asignacion, c.Expresion) and isinstance(asignacion.expr, c.Asigna)  # noqa: S101
+    valor = asignacion.expr.valor
+    for sitio in sitios:
+        c.reemplazar_hijo(sitio.padre, sitio.nodo, copy.deepcopy(valor))
+    del bloque.items[indice]
+    _quitar_declaracion(ctx.funcion, nombre)
+    return f"quitar_variable_intermedia_en_ramas({nombre} = {an.texto_de(valor)})"
+
+
+def _es_almacen(ctx: Contexto, sentencia: c.Sentencia) -> bool:
+    """Una asignacion a memoria (campo, elemento, ``*p``) o a una variable global."""
+    if not (isinstance(sentencia, c.Expresion) and isinstance(sentencia.expr, c.Asigna)):
+        return False
+    destino = sentencia.expr.destino
+    return isinstance(destino, c.Miembro | c.Indice) or (
+        (isinstance(destino, c.Unario) and destino.op == "*")
+        or (isinstance(destino, c.Id) and destino.nombre not in ctx.entorno.locales)
+    )
+
+
+def _es_lectura_guardable(ctx: Contexto, sitio: Sitio, tipo: an.Tipo | None, vedados: set[str]) -> bool:
+    """Un acceso escalar puro a una global, a un campo o a ``*p``, de evaluacion incondicional."""
+    nodo = sitio.nodo
+    es_global = isinstance(nodo, c.Id) and nodo.nombre not in ctx.entorno.locales
+    es_carga = es_global or isinstance(nodo, c.Miembro) or (isinstance(nodo, c.Unario) and nodo.op == "*")
+    return (
+        es_carga
+        and tipo is not None
+        and tipo.es_escalar
+        and not sitio.perezoso
+        and not sitio.lvalue
+        and an.es_pura(nodo)
+        and not an.identificadores_de(nodo) & vedados
+    )
+
+
+def _almacenes_que_no_alcanzan(
+    ctx: Contexto, bloque: c.Bloque, uso: int, lectura: c.Expr, memoria: dict[int, an.Efectos]
+) -> list[int]:
+    """
+    Posiciones de los almacenes del bloque anteriores al uso que no pueden escribir lo que lee ``lectura``.
+
+    Se sube desde el uso sentencia a sentencia mientras ninguna escriba la lectura, tenga flujo no
+    local o sea una barrera; cada almacen del recorrido es una posicion donde guardar la lectura justo
+    antes de el.
+    """
+    efectos_de_lectura = an.efectos_de(c.Expresion(expr=lectura), ctx.alias)
+    piso = max(_fin_de_declaraciones(bloque), uso - DISTANCIA_MAXIMA_DE_LECTURA)
+    posiciones: list[int] = []
+    for posicion in range(uso - 1, piso - 1, -1):
+        vecina = bloque.items[posicion]
+        efectos = memoria.setdefault(id(vecina), an.efectos_profundos(vecina, ctx.alias))
+        if _tiene_flujo_no_local(vecina) or an.escritura_alcanza(efectos, efectos_de_lectura):
+            break
+        if _es_almacen(ctx, vecina):
+            posiciones.append(posicion)
+    return posiciones
+
+
+def _lecturas_para_guardar(ctx: Contexto) -> list[tuple[c.Bloque, int, int, Sitio, an.Tipo]]:
+    """Lecturas usadas tras un almacen que no las escribe: bloque, posicion del almacen, uso, sitio y tipo."""
+    vedados = _nombres_vedados(ctx) - ctx.entorno.parametros
+    candidatas: list[tuple[c.Bloque, int, int, Sitio, an.Tipo]] = []
+    memoria: dict[int, an.Efectos] = {}
+    for bloque, uso, sentencia in _sentencias(ctx.funcion):
+        if not isinstance(sentencia, _SENTENCIAS_CON_EXPRESION_DE_USO):
+            continue
+        for raiz in c.expresiones_de(sentencia):
+            if not _aparicion_unica_de_asignacion(raiz):
+                continue
+            for sitio in sitios_de(raiz, sentencia):
+                tipo = ctx.entorno.inferir(sitio.nodo)
+                if tipo is None or not _es_lectura_guardable(ctx, sitio, tipo, vedados):
+                    continue
+                candidatas.extend(
+                    (bloque, posicion, uso, sitio, tipo)
+                    for posicion in _almacenes_que_no_alcanzan(ctx, bloque, uso, sitio.nodo, memoria)
+                )
+    return candidatas
+
+
+def _locales_libres(ctx: Contexto, bloque: c.Bloque, almacen: int, uso: int, tipo: an.Tipo) -> list[str]:
+    """
+    Locales ya declaradas, del tipo exacto, cuyo valor no importa entre el almacen y el uso.
+
+    La local no se menciona entre el almacen y el uso (ambos inclusive) y todas sus apariciones estan en
+    las sentencias posteriores al uso del mismo bloque, donde la primera le da valor antes de leerla:
+    escribirla antes no puede cambiar ningun valor que alguien lea.
+    """
+    posteriores = bloque.items[uso + 1 :]
+    dentro = {id(s) for sentencia in posteriores for s in _anidadas(sentencia)}
+    libres: list[str] = []
+    for nombre, (_, declaracion) in _declaraciones_simples(ctx).items():
+        propio = ctx.entorno.locales.get(nombre)
+        if propio is None or propio.texto != tipo.texto or propio.arreglo or declaracion.inicial is not None:
+            continue
+        if any(nombre in _nombres_en(s) for s in bloque.items[almacen : uso + 1]):
+            continue
+        usos = _usos_de(ctx.funcion, nombre)
+        if all(id(sentencia) in dentro for sentencia, _ in usos) and (
+            not usos or _empieza_asignando(posteriores, nombre)
+        ):
+            libres.append(nombre)
+    return libres
+
+
+def guardar_lectura_antes_del_almacen(ctx: Contexto) -> str | None:
+    """
+    Lee una variable global, un campo o ``*p`` antes de un almacen intermedio y usa la copia despues.
+
+    Contexto:
+        ``S; ...; usa(L)`` pasa a ``t = L; S; ...; usa(t)``: el compilador no sube por si solo una carga
+        por encima de un almacen, y la copia deja la carga delante y el almacen en su sitio, con el
+        valor viviendo en su propio registro hasta el uso. Solo se aplica cuando el analisis de alias
+        del modulo demuestra que ninguna sentencia entre el almacen y el uso (ni el almacen) escribe lo
+        que ``L`` lee, sin llamadas, saltos ni ``return`` de por medio. La copia va a una local que ya
+        existe, del mismo tipo y libre en ese tramo (no se menciona en el, y despues solo se escribe
+        antes de leerla); si no hay ninguna, a una local nueva. Se diferencia de ``local_de_campo`` en
+        que la posicion es siempre justo antes de un almacen, en que admite variables globales y en
+        que reutiliza locales existentes.
+
+    Args:
+        ctx (Contexto): Contexto de la ronda.
+
+    Returns:
+        str | None: Descripcion, o ``None`` si ninguna lectura se puede guardar.
+
+    Ejemplo:
+        descripcion = guardar_lectura_antes_del_almacen(contexto)
+    """
+    elegida = _elegir(ctx.azar, _lecturas_para_guardar(ctx))
+    if elegida is None:
+        return None
+    bloque, almacen, uso, sitio, tipo = elegida
+    libre = _elegir(ctx.azar, _locales_libres(ctx, bloque, almacen, uso, tipo))
+    nombre = libre if libre is not None else _nombre_temporal(ctx)
+    clave = an.texto_de(sitio.nodo)
+    copia = copy.deepcopy(sitio.nodo)
+    c.reemplazar_hijo(sitio.padre, sitio.nodo, c.Id(nombre))
+    bloque.items.insert(almacen, c.Expresion(expr=c.Asigna("=", c.Id(nombre), copia)))
+    if libre is None:
+        _declarar_temporal(ctx, nombre, tipo)
+    return f"guardar_lectura_antes_del_almacen({tipo.texto} {nombre} = {clave}, {uso - almacen} antes)"
+
+
+# ---------------------------------------------------------------------------------------------------
 # Orquestacion
 # ---------------------------------------------------------------------------------------------------
 
@@ -5037,6 +5670,12 @@ MUTACIONES: tuple[tuple[str, Mutacion, float], ...] = (
     ("acceso_por_desplazamiento", acceso_por_desplazamiento, 1.5),
     ("almacen_directo_en_cada_rama", almacen_directo_en_cada_rama, 1.5),
     ("leer_bajo_la_guarda", leer_bajo_la_guarda, 1.5),
+    ("signo_de_la_comparacion", signo_de_la_comparacion, 1.0),
+    ("reagrupar_suma", reagrupar_suma, 1.0),
+    ("recorte_de_bits_altos", recorte_de_bits_altos, 1.0),
+    ("bucle_do_while_y_while", bucle_do_while_y_while, 1.0),
+    ("quitar_variable_intermedia_en_ramas", quitar_variable_intermedia_en_ramas, 1.0),
+    ("guardar_lectura_antes_del_almacen", guardar_lectura_antes_del_almacen, 1.5),
 )
 INTENTOS_POR_MUTACION = 12
 MAX_VECINOS_POR_MUTACION = 5000

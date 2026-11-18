@@ -29,8 +29,23 @@ PESOS_REGISTRADOS = {
     "acceso_por_desplazamiento": 1.5,
     "almacen_directo_en_cada_rama": 1.5,
     "leer_bajo_la_guarda": 1.5,
+    "signo_de_la_comparacion": 1.0,
+    "reagrupar_suma": 1.0,
+    "recorte_de_bits_altos": 1.0,
+    "bucle_do_while_y_while": 1.0,
+    "quitar_variable_intermedia_en_ramas": 1.0,
+    "guardar_lectura_antes_del_almacen": 1.5,
 }
-NUEVAS_DE_LA_VERSION = ("acceso_por_desplazamiento", "almacen_directo_en_cada_rama", "leer_bajo_la_guarda")
+NUEVAS_DE_LA_VERSION = (
+    "signo_de_la_comparacion",
+    "reagrupar_suma",
+    "recorte_de_bits_altos",
+    "bucle_do_while_y_while",
+    "quitar_variable_intermedia_en_ramas",
+    "guardar_lectura_antes_del_almacen",
+)
+NUEVAS_DE_LA_0_3_1 = ("acceso_por_desplazamiento", "almacen_directo_en_cada_rama", "leer_bajo_la_guarda")
+FIRMA_CON_SIN_SIGNO = "void f(Nodo* p, Nodo* q, Mundo* m, s32 a, s32 b, u32 x)"
 
 # Un fragmento minimo donde cada mutacion tiene al menos un sitio aplicable.
 SITIOS: dict[str, str] = {
@@ -55,7 +70,51 @@ SITIOS: dict[str, str] = {
         "s32 v;", "if (a) {", "    v = b + 1;", "} else {", "    v = b - 1;", "}", "p->valor = v;"
     ),
     "leer_bajo_la_guarda": cuerpo("s32 u;", "u = p->valor + b;", "if (a) {", "    q->clave = u;", "}"),
+    "signo_de_la_comparacion": cuerpo(
+        "u32 i;", "i = a;", "while (i < 3) {", "    D_global = i;", "    i++;", "}"
+    ),
+    "reagrupar_suma": cuerpo("D_global = a + b + D_otra;"),
+    "recorte_de_bits_altos": cuerpo("a = (x << 8) >> 8;", firma=FIRMA_CON_SIN_SIGNO),
+    "bucle_do_while_y_while": cuerpo(
+        "if (a < 5) {", "    do {", "        D_global = a;", "        a += 1;", "    } while (a < 5);", "}"
+    ),
+    "quitar_variable_intermedia_en_ramas": cuerpo(
+        "s32 t;",
+        "t = a * b;",
+        "if (D_global) {",
+        "    p->valor = t >> 11;",
+        "} else {",
+        "    q->valor = t >> 11;",
+        "}",
+    ),
+    "guardar_lectura_antes_del_almacen": cuerpo("q->clave = 4;", "D_global = D_otra;"),
 }
+FUNCION_CON_LOS_NUEVOS_SITIOS = cuerpo(
+    "s32 t;",
+    "u32 i;",
+    "t = a * b;",
+    "if (D_global) {",
+    "    p->valor = t >> 11;",
+    "} else {",
+    "    q->valor = t >> 11;",
+    "}",
+    "i = x;",
+    "while (i < 3) {",
+    "    D_otra = i;",
+    "    i++;",
+    "}",
+    "if (a < 5) {",
+    "    do {",
+    "        D_global = a;",
+    "        a += 1;",
+    "    } while (a < 5);",
+    "}",
+    "a = (x << 8) >> 8;",
+    "D_global = a + b + D_otra;",
+    "q->clave = 4;",
+    "D_global = D_otra;",
+    firma=FIRMA_CON_SIN_SIGNO,
+)
 FUNCION_CON_LOS_TRES_SITIOS = cuerpo(
     "s32 v;",
     "s32 u;",
@@ -105,23 +164,35 @@ def test_el_nombre_de_cada_descripcion_coincide_con_el_de_la_mutacion_registrada
             assert descripcion.split("(", 1)[0] in registrados
 
 
-def test_toda_variante_de_las_mutaciones_nuevas_se_imprime_y_se_lee_igual() -> None:
+CONJUNTOS_DE_VERSION = (
+    pytest.param(FUNCION_CON_LOS_NUEVOS_SITIOS, NUEVAS_DE_LA_VERSION, id="0.3.2"),
+    pytest.param(FUNCION_CON_LOS_TRES_SITIOS, NUEVAS_DE_LA_0_3_1, id="0.3.1"),
+)
+
+
+@pytest.mark.parametrize(("texto_base", "nuevas"), CONJUNTOS_DE_VERSION)
+def test_toda_variante_de_las_mutaciones_nuevas_se_imprime_y_se_lee_igual(
+    texto_base: str, nuevas: tuple[str, ...]
+) -> None:
     tabla = an.construir_tabla([CABECERA])
-    base = c.analizar_funcion(FUNCION_CON_LOS_TRES_SITIOS, "f", TIPOS)
+    base = c.analizar_funcion(texto_base, "f", TIPOS)
     vistas = set()
     for variante, descripcion in mut.vecinos(base, tabla):
         nombre = descripcion.split("(", 1)[0]
-        if nombre not in NUEVAS_DE_LA_VERSION:
+        if nombre not in nuevas:
             continue
         vistas.add(nombre)
         texto = c.imprimir_funcion(variante)
         assert c.imprimir_funcion(c.analizar_funcion(texto, "f", TIPOS)) == texto
-    assert vistas == set(NUEVAS_DE_LA_VERSION)
+    assert vistas == set(nuevas)
 
 
-def test_la_busqueda_cuenta_como_intentadas_las_tres_mutaciones_nuevas(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("texto_base", "nuevas"), CONJUNTOS_DE_VERSION)
+def test_la_busqueda_cuenta_como_intentadas_las_mutaciones_nuevas(
+    tmp_path: Path, texto_base: str, nuevas: tuple[str, ...]
+) -> None:
     tabla = an.construir_tabla([CABECERA])
-    base = c.analizar_funcion(FUNCION_CON_LOS_TRES_SITIOS, "f", TIPOS)
+    base = c.analizar_funcion(texto_base, "f", TIPOS)
     estado = est.Estado("f", "codigo/modulo_a.c", 5, 50, 50, 50)
     busqueda = pm.Busqueda(
         base,
@@ -136,4 +207,34 @@ def test_la_busqueda_cuenta_como_intentadas_las_tres_mutaciones_nuevas(tmp_path:
     busqueda.iniciar_barrido()
     busqueda.ejecutar()
     intentadas = busqueda.estado.mutaciones_intentadas
-    assert all(intentadas.get(nombre, 0) > 0 for nombre in NUEVAS_DE_LA_VERSION)
+    assert all(intentadas.get(nombre, 0) > 0 for nombre in nuevas)
+
+
+def test_la_busqueda_no_mide_ninguna_variante_con_una_operacion_nueva_partida_en_dos_sentencias(
+    tmp_path: Path,
+) -> None:
+    tabla = an.construir_tabla([CABECERA])
+    base = c.analizar_funcion(FUNCION_CON_LOS_NUEVOS_SITIOS, "f", TIPOS)
+    partidas_base = mut.contar_operaciones_partidas(base)
+    medidas: list[str] = []
+
+    def evaluar(texto: str, umbral: int) -> ev.ResultadoEvaluacion:
+        medidas.append(texto)
+        return ev.ResultadoEvaluacion(50)
+
+    estado = est.Estado("f", "codigo/modulo_a.c", 5, 50, 50, 50)
+    busqueda = pm.Busqueda(
+        base,
+        tabla,
+        evaluar,
+        estado=estado,
+        carpeta=tmp_path / "estado",
+        opciones=pm.Opciones(iteraciones=1500, procesos=2),
+        salida=lambda texto: None,
+        reloj=Reloj(0.001),
+    )
+    busqueda.iniciar_barrido()
+    busqueda.ejecutar()
+    assert medidas
+    for texto in medidas:
+        assert mut.contar_operaciones_partidas(c.analizar_funcion(texto, "f", TIPOS)) <= partidas_base
