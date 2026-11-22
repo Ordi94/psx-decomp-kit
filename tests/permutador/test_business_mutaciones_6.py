@@ -1,8 +1,9 @@
 """Reglas de negocio: signo de la comparacion, suma reagrupada, recorte de bits, bucles y locales de rama."""
 
+from psxdecomp.permutador import c
 from psxdecomp.permutador import mutaciones as mut
 
-from .ayudantes_mutaciones import aplicar, cuerpo, sin_cambio, todas_las_variantes
+from .ayudantes_mutaciones import TIPOS, aplicar, cuerpo, sin_cambio, todas_las_variantes
 
 FIRMA_SIN_SIGNO = "void f(Nodo* p, Nodo* q, Mundo* m, s32 a, s32 b, u32 x, s16 h, s32* r)"
 
@@ -18,40 +19,47 @@ def con_firma(*lineas: str) -> str:
 def test_un_contador_sin_signo_comparado_con_una_constante_pequena_recibe_el_molde_con_signo() -> None:
     texto = con_firma("u32 i;", "i = a;", "while (i < 3) {", "    D_global = i;", "    i++;", "}")
     descripcion, resultado = aplicar(mut.signo_de_la_comparacion, texto)
-    assert descripcion is not None
-    assert descripcion.startswith("signo_de_la_comparacion(")
-    assert "while ((s32)i < 3)" in resultado
+    assert descripcion == "signo_de_la_comparacion(i < 3, s32)"
+    assert resultado == con_firma(
+        "u32 i;", "i = a;", "while ((s32)i < 3) {", "    D_global = i;", "    i++;", "}"
+    )
 
 
 def test_una_variable_con_signo_recibe_el_molde_sin_signo() -> None:
     _, resultado = aplicar(mut.signo_de_la_comparacion, con_firma("if (a >= 7) {", "    D_global = 1;", "}"))
-    assert "if ((u32)a >= 7)" in resultado
+    assert resultado == con_firma("if ((u32)a >= 7) {", "    D_global = 1;", "}")
 
 
 def test_el_molde_existente_de_32_bits_se_quita() -> None:
     texto = con_firma("u32 i;", "i = a;", "while ((s32)i < 3) {", "    D_global = i;", "    i++;", "}")
-    _, resultado = aplicar(mut.signo_de_la_comparacion, texto)
-    assert "while (i < 3)" in resultado
+    descripcion, resultado = aplicar(mut.signo_de_la_comparacion, texto)
+    assert descripcion == "signo_de_la_comparacion((s32)i < 3, quitar)"
+    assert resultado == con_firma("u32 i;", "i = a;", "while (i < 3) {", "    D_global = i;", "    i++;", "}")
 
 
 def test_la_constante_a_la_izquierda_tambien_fija_el_signo_del_operando_de_la_derecha() -> None:
     _, resultado = aplicar(mut.signo_de_la_comparacion, con_firma("if (3 > x) {", "    D_global = 1;", "}"))
-    assert "if (3 > (s32)x)" in resultado
+    assert resultado == con_firma("if (3 > (s32)x) {", "    D_global = 1;", "}")
 
 
 def test_el_molde_se_aplica_en_la_condicion_de_cada_tipo_de_bucle() -> None:
-    for lineas in (
-        ("do {", "    a++;", "} while (a < 9);"),
-        ("for (a = 0; a < 9; a++) {", "    D_global = a;", "}"),
-    ):
-        descripcion, _ = aplicar(mut.signo_de_la_comparacion, con_firma(*lineas))
-        assert descripcion is not None
+    casos = (
+        (("do {", "    a++;", "} while (a < 9);"), ("do {", "    a++;", "} while ((u32)a < 9);")),
+        (
+            ("for (a = 0; a < 9; a++) {", "    D_global = a;", "}"),
+            ("for (a = 0; (u32)a < 9; a++) {", "    D_global = a;", "}"),
+        ),
+    )
+    for entrada, esperada in casos:
+        descripcion, resultado = aplicar(mut.signo_de_la_comparacion, con_firma(*entrada))
+        assert descripcion == "signo_de_la_comparacion(a < 9, u32)"
+        assert resultado == con_firma(*esperada)
 
 
 def test_una_comparacion_dentro_de_una_condicion_compuesta_tambien_se_considera() -> None:
     texto = con_firma("if (b != 0 && x < 4) {", "    D_global = 1;", "}")
     _, resultado = aplicar(mut.signo_de_la_comparacion, texto)
-    assert "(s32)x < 4" in resultado
+    assert resultado == con_firma("if (b != 0 && (s32)x < 4) {", "    D_global = 1;", "}")
 
 
 def test_el_molde_no_se_aplica_si_la_constante_llega_al_umbral_o_es_negativa() -> None:
@@ -133,8 +141,9 @@ def test_solo_se_reagrupan_las_sumas_de_tres_terminos() -> None:
 
 
 def test_los_sumandos_estrechos_se_reagrupan_como_enteros() -> None:
-    descripcion, _ = aplicar(mut.reagrupar_suma, cuerpo("D_global = p->corto + p->byte + b;"))
-    assert descripcion is not None
+    descripcion, resultado = aplicar(mut.reagrupar_suma, cuerpo("D_global = p->corto + p->byte + b;"))
+    assert descripcion == "reagrupar_suma(p->corto + p->byte + b -> p->corto + b + p->byte)"
+    assert resultado == cuerpo("D_global = p->corto + b + p->byte;")
 
 
 def test_una_suma_usada_como_destino_de_una_direccion_no_se_reagrupa() -> None:
@@ -145,25 +154,27 @@ def test_una_suma_usada_como_destino_de_una_direccion_no_se_reagrupa() -> None:
 
 
 def test_dos_desplazamientos_de_un_valor_sin_signo_pasan_a_una_mascara() -> None:
-    _, resultado = aplicar(mut.recorte_de_bits_altos, con_firma("a = (x << 8) >> 8;"))
-    assert "a = x & 0xFFFFFF;" in resultado
+    descripcion, resultado = aplicar(mut.recorte_de_bits_altos, con_firma("a = (x << 8) >> 8;"))
+    assert descripcion == "recorte_de_bits_altos((x << 8) >> 8, recortar)"
+    assert resultado == con_firma("a = x & 0xFFFFFF;")
 
 
 def test_la_mascara_depende_de_la_cantidad_desplazada() -> None:
     _, resultado = aplicar(mut.recorte_de_bits_altos, con_firma("a = (x << 1) >> 1;"))
-    assert "a = x & 0x7FFFFFFF;" in resultado
+    assert resultado == con_firma("a = x & 0x7FFFFFFF;")
     _, resultado = aplicar(mut.recorte_de_bits_altos, con_firma("a = (x << 31) >> 31;"))
-    assert "a = x & 0x1;" in resultado
+    assert resultado == con_firma("a = x & 0x1;")
 
 
 def test_una_mascara_de_bits_bajos_pasa_a_dos_desplazamientos() -> None:
-    _, resultado = aplicar(mut.recorte_de_bits_altos, con_firma("a = x & 0xFFFF;"))
-    assert "a = (x << 16) >> 16;" in resultado
+    descripcion, resultado = aplicar(mut.recorte_de_bits_altos, con_firma("a = x & 0xFFFF;"))
+    assert descripcion == "recorte_de_bits_altos(x & 0xFFFF, ampliar)"
+    assert resultado == con_firma("a = (x << 16) >> 16;")
 
 
 def test_la_mascara_a_la_izquierda_tambien_pasa_a_dos_desplazamientos() -> None:
     _, resultado = aplicar(mut.recorte_de_bits_altos, con_firma("a = 0xFF & x;"))
-    assert "a = (x << 24) >> 24;" in resultado
+    assert resultado == con_firma("a = (x << 24) >> 24;")
 
 
 def test_la_ida_y_la_vuelta_del_recorte_devuelven_el_mismo_valor() -> None:
@@ -414,8 +425,11 @@ def test_la_escritura_posterior_al_uso_no_impide_la_sustitucion() -> None:
         "    q->valor = t;",
         "}",
     )
-    descripcion, _ = aplicar(mut.quitar_variable_intermedia_en_ramas, texto)
-    assert descripcion is not None
+    descripcion, resultado = aplicar(mut.quitar_variable_intermedia_en_ramas, texto)
+    assert descripcion == "quitar_variable_intermedia_en_ramas(t = a * b)"
+    assert resultado == cuerpo(
+        "if (D_global) {", "    p->valor = a * b;", "    a = 3;", "} else {", "    q->valor = a * b;", "}"
+    )
 
 
 def test_un_uso_condicional_anidado_o_en_la_condicion_de_un_bucle_no_se_sustituye() -> None:
@@ -514,29 +528,38 @@ def test_la_lectura_se_guarda_en_una_local_existente_libre_del_mismo_tipo() -> N
 def test_una_local_que_se_usa_antes_del_tramo_no_esta_libre() -> None:
     texto = cuerpo("s32 w;", "w = a;", "D_otra = w;", "q->clave = 4;", "D_global = D_otra;")
     _, resultado = aplicar(mut.guardar_lectura_antes_del_almacen, texto)
-    assert "s32 tmp1;" in resultado
-    assert "w = D_otra;" not in resultado
+    assert resultado == cuerpo(
+        "s32 w;", "s32 tmp1;", "w = a;", "D_otra = w;", "tmp1 = D_otra;", "q->clave = 4;", "D_global = tmp1;"
+    )
 
 
 def test_una_local_que_se_lee_despues_sin_asignarla_antes_no_esta_libre() -> None:
     texto = cuerpo("s32 w;", "q->clave = 4;", "D_global = D_otra;", "D_otra = w;")
     _, resultado = aplicar(mut.guardar_lectura_antes_del_almacen, texto)
-    assert "s32 tmp1;" in resultado
+    assert resultado == cuerpo(
+        "s32 w;", "s32 tmp1;", "tmp1 = D_otra;", "q->clave = 4;", "D_global = tmp1;", "D_otra = w;"
+    )
 
 
 def test_una_local_mencionada_dentro_del_tramo_no_esta_libre() -> None:
     texto = cuerpo("s32 w;", "q->clave = 4;", "w = 1;", "D_global = D_otra + w;")
     _, resultado = aplicar(mut.guardar_lectura_antes_del_almacen, texto)
-    assert "s32 tmp1;" in resultado
+    assert resultado == cuerpo(
+        "s32 w;", "s32 tmp1;", "tmp1 = D_otra;", "q->clave = 4;", "w = 1;", "D_global = tmp1 + w;"
+    )
 
 
 def test_una_local_de_otro_tipo_o_con_inicializador_no_esta_libre() -> None:
     otro_tipo = cuerpo("s16 w;", "q->clave = 4;", "D_global = D_otra;", "w = a;", "D_otra = w;")
     _, resultado = aplicar(mut.guardar_lectura_antes_del_almacen, otro_tipo)
-    assert "s32 tmp1;" in resultado
+    assert resultado == cuerpo(
+        "s16 w;", "s32 tmp1;", "tmp1 = D_otra;", "q->clave = 4;", "D_global = tmp1;", "w = a;", "D_otra = w;"
+    )
     con_inicial = cuerpo("s32 w = 5;", "q->clave = 4;", "D_global = D_otra;", "D_otra = w;")
     _, resultado = aplicar(mut.guardar_lectura_antes_del_almacen, con_inicial)
-    assert "s32 tmp1;" in resultado
+    assert resultado == cuerpo(
+        "s32 w = 5;", "s32 tmp1;", "tmp1 = D_otra;", "q->clave = 4;", "D_global = tmp1;", "D_otra = w;"
+    )
 
 
 def test_una_local_sin_ningun_uso_esta_libre() -> None:
@@ -579,7 +602,8 @@ def test_una_variable_local_no_es_una_lectura_que_guardar() -> None:
 def test_la_lectura_que_se_guarda_no_crea_una_operacion_partida() -> None:
     funcion_base = cuerpo("q->clave = 4;", "D_global = D_otra;")
     _, resultado = aplicar(mut.guardar_lectura_antes_del_almacen, funcion_base)
-    assert resultado.count("tmp1") == 3
+    assert resultado == cuerpo("s32 tmp1;", "tmp1 = D_otra;", "q->clave = 4;", "D_global = tmp1;")
+    assert mut.contar_operaciones_partidas(c.analizar_funcion(resultado, "f", TIPOS)) == 0
 
 
 # --- entregables que las mutaciones existentes ya cubren --------------------------------------------------
