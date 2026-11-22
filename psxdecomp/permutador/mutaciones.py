@@ -5846,9 +5846,10 @@ def _menciona(sentencia: c.Sentencia, nombre: str) -> bool:
     return any(nombre in an.identificadores_de(raiz) for raiz in c.expresiones_de(sentencia))
 
 
-def _contiene_llamada(sentencia: c.Sentencia) -> bool:
+def _sentencia_llama_a_funcion(sentencia: c.Sentencia) -> bool:
     """La sentencia llama a alguna funcion."""
-    return any(isinstance(nodo, c.Llamada) for raiz in c.expresiones_de(sentencia) for nodo in c.recorrer(raiz))
+    raices = c.expresiones_de(sentencia)
+    return any(isinstance(nodo, c.Llamada) for raiz in raices for nodo in c.recorrer(raiz))
 
 
 def _es_paso_unitario(expr: c.Expr, nombre: str, operador: str) -> bool:
@@ -5887,7 +5888,7 @@ def _es_reasignacion_sobre_si_misma(sentencia: c.Sentencia, nombre: str) -> bool
 
 
 def _es_decremento_seguido_de_incremento(items: list[c.Sentencia], indice: int, nombre: str) -> bool:
-    """La sentencia ``indice`` es ``nombre--;`` y la siguiente es ``nombre++;``: otra forma, ajena a la regla."""
+    """La sentencia ``indice`` es ``nombre--;`` y la siguiente ``nombre++;``: otra forma, ajena a la regla."""
     actual = items[indice]
     if not (
         isinstance(actual, c.Expresion)
@@ -5925,10 +5926,10 @@ def _tiene_continuacion(items: list[c.Sentencia], inicio: int, nombre: str) -> b
         if not isinstance(sentencia, c.Expresion | c.Decl):
             return False
         if _menciona(sentencia, nombre):
-            return _es_reasignacion_sobre_si_misma(sentencia, nombre) and not _es_decremento_seguido_de_incremento(
-                items, indice, nombre
-            )
-        if _contiene_llamada(sentencia):
+            if _es_decremento_seguido_de_incremento(items, indice, nombre):
+                return False
+            return _es_reasignacion_sobre_si_misma(sentencia, nombre)
+        if _sentencia_llama_a_funcion(sentencia):
             return False
     return False
 

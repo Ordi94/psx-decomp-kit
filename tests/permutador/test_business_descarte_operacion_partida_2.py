@@ -55,6 +55,11 @@ def test_una_llamada_entre_el_par_puede_justificar_la_separacion_y_no_se_cuenta(
     assert partidas("v = a << 8;", "b = g(a);", "v >>= 8;") == 0
 
 
+def test_una_declaracion_que_lee_la_variable_no_es_la_segunda_sentencia_del_par() -> None:
+    texto = cuerpo("s32 v;", "v = a << 8;", "s32 w = v;", "D_global = w;", "v >>= 8;")
+    assert mut.contar_operaciones_partidas(c.analizar_funcion(texto, "f", TIPOS)) == 0
+
+
 def test_una_declaracion_con_llamada_entre_el_par_tampoco_se_cuenta() -> None:
     texto = cuerpo("s32 v;", "v = a << 8;", "s32 w = g(b);", "D_global = w;", "v >>= 8;")
     assert mut.contar_operaciones_partidas(c.analizar_funcion(texto, "f", TIPOS)) == 0
@@ -133,7 +138,7 @@ def test_un_paso_unitario_sobre_otra_variable_no_es_la_segunda_sentencia() -> No
 # --- sin cambios en lo que no es un par -----------------------------------------------------------------
 
 
-def test_la_segunda_sentencia_con_desreferencia_o_llamada_sigue_sin_contar_con_sentencias_intermedias() -> None:
+def test_una_segunda_sentencia_con_memoria_o_llamada_no_cuenta_aunque_haya_intermedias() -> None:
     assert partidas("n = p;", "D_global = 1;", "n = n->sig;") == 0
     assert partidas("v = a;", "D_global = 1;", "v = g(v);") == 0
     assert partidas("v = a;", "D_global = 1;", "v += b;") == 0
@@ -164,7 +169,9 @@ def test_la_variante_con_el_par_de_dos_compuestas_se_descarta_con_su_motivo() ->
 
 
 def test_la_variante_con_el_par_separado_se_descarta_con_su_motivo() -> None:
-    base = c.analizar_funcion(cuerpo("s32 v;", "v = a << 8;", "p->valor = 3;", "D_global = v >> 8;"), "f", TIPOS)
+    base = c.analizar_funcion(
+        cuerpo("s32 v;", "v = a << 8;", "p->valor = 3;", "D_global = v >> 8;"), "f", TIPOS
+    )
     nueva = c.analizar_funcion(
         cuerpo("s32 v;", "v = a << 8;", "p->valor = 3;", "v >>= 8;", "D_global = v;"), "f", TIPOS
     )
@@ -214,7 +221,7 @@ def test_la_busqueda_descarta_con_su_motivo_la_variante_con_dos_compuestas_o_con
 
 
 def _separa_el_par(variante: c.Funcion) -> bool:
-    """La variante tiene el almacen ``p->valor = 3;`` justo entre ``v = a + 4;`` y la segunda sentencia de ``v``."""
+    """La variante deja el almacen ``p->valor = 3;`` entre ``v = a + 4;`` y la segunda sentencia de ``v``."""
     lineas = [linea.strip() for linea in c.imprimir_funcion(variante).splitlines()]
     if "v = a + 4;" not in lineas:
         return False
@@ -223,7 +230,9 @@ def _separa_el_par(variante: c.Funcion) -> bool:
 
 
 def test_una_mutacion_existente_separa_el_par_con_una_sentencia_intermedia_y_la_regla_lo_descarta() -> None:
-    base = c.analizar_funcion(cuerpo("s32 v;", "v = a + 4 + 8;", "p->valor = 3;", "D_global = v;"), "f", TIPOS)
+    base = c.analizar_funcion(
+        cuerpo("s32 v;", "v = a + 4 + 8;", "p->valor = 3;", "D_global = v;"), "f", TIPOS
+    )
     tabla = an.construir_tabla([CABECERA])
     cuenta_base = mut.contar_operaciones_partidas(base)
     pares_separados = [
