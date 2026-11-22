@@ -17,7 +17,7 @@ Un paquete Python, `psxdecomp`, con las piezas genericas de un proyecto de desco
 - instalacion verificada del toolchain externo (SDK, binutils, `maspsx`, `asm-differ`);
 - cargador y validador del manifiesto `psxdecomp.toml`, unica fuente de todo lo que depende del proyecto.
 
-Version 0.3.2, Python 3.13 o superior, licencia MIT.
+Version 0.3.3, Python 3.13 o superior, licencia MIT.
 
 ## Que no es
 
@@ -476,13 +476,24 @@ mismo tipo escalar, que cualquier escritura posterior, etiqueta o salto anula.
 ### Regla de descarte: operacion partida en dos sentencias
 
 Ademas del filtro de construcciones prohibidas, la busqueda descarta sin compilarla toda variante que tenga
-mas operaciones partidas en dos sentencias que el C de partida. Un par `v = E1;` seguido de `v = F(v);` sobre
-la misma variable local o parametro (identificador simple), donde la segunda sentencia lee `v` y no lee
-ninguna otra variable (solo constantes, sin desreferencias ni llamadas), por ejemplo `v = a << 8; v = v >> 8;`
-o `v = p + 4; v = v & 3;`, no es otra forma de escribir el programa: una operacion que cabia en una sola
-sentencia se ha partido para repartir de otro modo los registros, y el buscador no debe proponerlo. Una
-asignacion compuesta (`v += k;`) tras `v = E1;` cuenta igual. `v = E1; v = v->campo;` no cuenta: hay un acceso
-a memoria entre medias.
+mas operaciones partidas en dos sentencias que el C de partida. Una operacion partida no es otra forma de
+escribir el programa: una operacion que cabia en una sola sentencia se ha partido para repartir de otro modo
+los registros, y el buscador no debe proponerlo.
+
+Cuenta como operacion partida todo par de sentencias de expresion (S1, S2) de una misma lista de sentencias
+(sin cruzar llaves, etiquetas, `case`, saltos ni sentencias de control) tal que:
+
+- S1 asigna a una variable simple `v` (local o parametro) con `=` o con una asignacion compuesta.
+- S2 es la siguiente sentencia que lee o escribe `v` y la reasigna leyendola (`v = F(v);`, `v op= k;`, `v++;`
+  o `v--;`) sin leer ninguna otra variable (solo constantes), sin desreferencias y sin llamadas.
+- Ninguna sentencia intermedia nombra `v` ni toma su direccion. Si hay sentencias intermedias, ninguna contiene
+  una llamada: una llamada entre medias puede justificar la separacion.
+
+Ejemplos que cuentan: `v = a << 8; v = v >> 8;`, `v = p + 4; v += 3;`, `v <<= 8; v >>= 8;` y
+`v = s << 8; q[2] = K; t = r[4]; q[3] = t; v >>= 8;`. `v++;` y `v--;` como S2 cuentan (`v = E1 + 1` partido),
+salvo el par `v--; v++;` consecutivo, que es otra forma ajena a esta regla. No cuentan `v = E1; v = v->campo;`
+(hay un acceso a memoria entre medias), `v = E1; v = f(v);`, el par que cruza un `if` o una etiqueta, ni el
+contador de un bucle (`i = 0; while (...) { ...; i++; }`: el incremento queda en otro bloque).
 
 La comparacion es contra el C de partida (`mutaciones.contar_operaciones_partidas`): los pares que ya estaban
 no descartan, pero ninguna mutacion puede crear uno nuevo (`dividir_asignacion` puede producirlo con

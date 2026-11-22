@@ -2,6 +2,21 @@
 
 El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y el versionado es semantico.
 
+## [0.3.3] - 2026-11-21
+
+### Cambiado
+
+- Regla de descarte `operacion_partida_en_dos_sentencias`: reconoce tambien el par cuya primera sentencia es una
+  asignacion compuesta (`v <<= 8; v >>= 8;`).
+- La misma regla reconoce el par separado por sentencias que no nombran la variable ni llaman a funciones
+  (`v = s << 8; q[2] = K; v >>= 8;`); una llamada, una llave, una etiqueta, un `case`, un salto o una sentencia
+  de control entre ambas lo corta, de modo que el contador de un bucle no se ve afectado.
+- La misma regla cuenta `v++;` y `v--;` como segunda sentencia tras una asignacion a la variable, salvo el par
+  `v--; v++;` consecutivo.
+- Pruebas de las mutaciones de la version anterior (`signo_de_la_comparacion`, `reagrupar_suma`,
+  `recorte_de_bits_altos`, `quitar_variable_intermedia_en_ramas`, `guardar_lectura_antes_del_almacen`): las
+  aserciones que solo comprobaban un fragmento o que el resultado no fuera nulo comparan ahora con el C exacto.
+
 ## [0.3.2] - 2026-11-17
 
 ### Anadido
