@@ -5816,24 +5816,121 @@ def _solo_la_variable_y_constantes(expr: c.Expr, nombre: str) -> bool:
     return True
 
 
-def _es_continuacion_de_la_operacion(primera: c.Sentencia, segunda: c.Sentencia, locales: set[str]) -> bool:
-    """La segunda sentencia termina, sobre la misma variable local, la operacion que empezo la primera."""
-    if not (isinstance(primera, c.Expresion) and isinstance(segunda, c.Expresion)):
+def _variable_que_asigna(sentencia: c.Sentencia, locales: set[str]) -> str | None:
+    """
+    Da la variable local que una sentencia de expresion asigna con ``=`` o con una compuesta.
+
+    Contexto:
+        Primera sentencia de un par de la regla de la operacion partida (``v = E;`` o ``v op= E;``).
+
+    Args:
+        sentencia (c.Sentencia): Sentencia candidata.
+        locales (set[str]): Locales y parametros de la funcion.
+
+    Returns:
+        str | None: Nombre de la variable, o ``None`` si no es una asignacion a un identificador local.
+
+    Ejemplo:
+        nombre = _variable_que_asigna(sentencia, {"v"})
+    """
+    if not (isinstance(sentencia, c.Expresion) and isinstance(sentencia.expr, c.Asigna)):
+        return None
+    destino = sentencia.expr.destino
+    if isinstance(destino, c.Id) and destino.nombre in locales:
+        return destino.nombre
+    return None
+
+
+def _menciona(sentencia: c.Sentencia, nombre: str) -> bool:
+    """La sentencia (de expresion o declaracion) nombra la variable en alguna de sus expresiones."""
+    return any(nombre in an.identificadores_de(raiz) for raiz in c.expresiones_de(sentencia))
+
+
+def _contiene_llamada(sentencia: c.Sentencia) -> bool:
+    """La sentencia llama a alguna funcion."""
+    return any(isinstance(nodo, c.Llamada) for raiz in c.expresiones_de(sentencia) for nodo in c.recorrer(raiz))
+
+
+def _es_paso_unitario(expr: c.Expr, nombre: str, operador: str) -> bool:
+    """La expresion es ``nombre++``/``++nombre`` (operador ``++``) o ``nombre--``/``--nombre`` (``--``)."""
+    return isinstance(expr, c.Postfijo | c.Unario) and expr.op == operador and _es_id(expr.operando, nombre)
+
+
+def _es_reasignacion_sobre_si_misma(sentencia: c.Sentencia, nombre: str) -> bool:
+    """
+    Indica si la sentencia reasigna la variable leyendola, sin otra variable, memoria ni llamadas.
+
+    Contexto:
+        Segunda sentencia de un par de la regla de la operacion partida: ``v = F(v);``, ``v op= k;``,
+        ``v++;`` o ``v--;``. Los pasos unitarios se cuentan como ``v = E + 1`` partido.
+
+    Args:
+        sentencia (c.Sentencia): Sentencia que es la siguiente en mencionar la variable.
+        nombre (str): Variable que escribio la primera sentencia.
+
+    Returns:
+        bool: Verdadero si es una continuacion de la operacion.
+
+    Ejemplo:
+        continua = _es_reasignacion_sobre_si_misma(sentencia, "v")
+    """
+    if not isinstance(sentencia, c.Expresion):
         return False
-    inicial, final = primera.expr, segunda.expr
-    if not (
-        isinstance(inicial, c.Asigna)
-        and inicial.op == "="
-        and isinstance(inicial.destino, c.Id)
-        and inicial.destino.nombre in locales
-        and isinstance(final, c.Asigna)
-        and _es_id(final.destino, inicial.destino.nombre)
-    ):
+    if _es_paso_unitario(sentencia.expr, nombre, "++") or _es_paso_unitario(sentencia.expr, nombre, "--"):
+        return True
+    final = sentencia.expr
+    if not (isinstance(final, c.Asigna) and _es_id(final.destino, nombre)):
         return False
-    nombre = inicial.destino.nombre
     if final.op == "=" and nombre not in an.identificadores_de(final.valor):
         return False
     return _solo_la_variable_y_constantes(final.valor, nombre)
+
+
+def _es_decremento_seguido_de_incremento(items: list[c.Sentencia], indice: int, nombre: str) -> bool:
+    """La sentencia ``indice`` es ``nombre--;`` y la siguiente es ``nombre++;``: otra forma, ajena a la regla."""
+    actual = items[indice]
+    if not (
+        isinstance(actual, c.Expresion)
+        and _es_paso_unitario(actual.expr, nombre, "--")
+        and indice + 1 < len(items)
+    ):
+        return False
+    siguiente = items[indice + 1]
+    return isinstance(siguiente, c.Expresion) and _es_paso_unitario(siguiente.expr, nombre, "++")
+
+
+def _tiene_continuacion(items: list[c.Sentencia], inicio: int, nombre: str) -> bool:
+    """
+    Indica si, tras la asignacion en ``inicio``, la siguiente sentencia que usa la variable la continua.
+
+    Contexto:
+        Recorre solo sentencias de expresion y declaraciones del mismo bloque: una llave, etiqueta,
+        ``case``, salto o sentencia de control corta el recorrido (no se puede afirmar que ambas
+        sentencias se ejecuten seguidas). Si hay sentencias intermedias y alguna llama a una funcion, la
+        separacion puede estar justificada y no se cuenta.
+
+    Args:
+        items (list[c.Sentencia]): Sentencias del bloque.
+        inicio (int): Posicion de la primera sentencia del par.
+        nombre (str): Variable asignada.
+
+    Returns:
+        bool: Verdadero si existe la segunda sentencia del par.
+
+    Ejemplo:
+        hay_par = _tiene_continuacion(bloque.items, 0, "v")
+    """
+    for indice in range(inicio + 1, len(items)):
+        sentencia = items[indice]
+        if not isinstance(sentencia, c.Expresion | c.Decl):
+            return False
+        if _menciona(sentencia, nombre):
+            return _es_reasignacion_sobre_si_misma(sentencia, nombre) and not _es_decremento_seguido_de_incremento(
+                items, indice, nombre
+            )
+        if _contiene_llamada(sentencia):
+            return False
+    return False
 
 
 def contar_operaciones_partidas(funcion: c.Funcion) -> int:
@@ -5842,18 +5939,24 @@ def contar_operaciones_partidas(funcion: c.Funcion) -> int:
 
     Contexto:
         Base de la regla de descarte ``operacion_partida_en_dos_sentencias``. Una operacion partida
-        (``v = a << 8; v = v >> 8;``, ``v = p + 4; v += 3;``) no es otra forma de escribir el programa: es
-        un ajuste al reparto de registros, y el buscador no debe proponerla. El par se reconoce solo
-        sobre una variable local o un parametro (identificador simple): la segunda sentencia lee la
-        variable y no lee ninguna otra, ni desreferencia, ni llama a nada (``v = v->sig;`` queda fuera:
-        hay un acceso a memoria entre medias). Una compuesta (``v += k;``) tras ``v = E;`` cuenta como la
-        misma particion.
+        (``v = a << 8; v = v >> 8;``, ``v = p + 4; v += 3;``, ``v <<= 8; v >>= 8;``) no es otra forma de
+        escribir el programa: es un ajuste al reparto de registros, y el buscador no debe proponerla.
+        El par (S1, S2) se reconoce solo sobre una variable local o un parametro (identificador simple),
+        dentro de una misma lista de sentencias: S1 asigna la variable con ``=`` o con una compuesta; S2
+        es la siguiente sentencia que la lee o la escribe y la reasigna leyendola (``v = F(v);``,
+        ``v op= k;``, ``v++;``, ``v--;``) sin leer otra variable, sin desreferencias y sin llamadas
+        (``v = v->sig;`` queda fuera: hay un acceso a memoria entre medias). Entre S1 y S2 puede haber
+        sentencias que no nombran la variable (``v = s << 8; q[2] = K; v >>= 8;``), pero si alguna llama
+        a una funcion la separacion puede estar justificada y no se cuenta; una llave, etiqueta, ``case``,
+        salto o sentencia de control entre ambas corta el par (el contador ``i = 0; while (...) {... i++;}``
+        no es un par). ``v++;`` y ``v--;`` como S2 cuentan, pues son ``v = E + 1`` partido, salvo el par
+        ``v--; v++;`` consecutivo, que es otra forma ajena a esta regla.
 
     Args:
         funcion (c.Funcion): Funcion que se analiza.
 
     Returns:
-        int: Cantidad de pares de sentencias consecutivas de un mismo bloque.
+        int: Cantidad de pares (S1, S2) de la funcion.
 
     Ejemplo:
         partidas = contar_operaciones_partidas(funcion)
@@ -5861,11 +5964,13 @@ def contar_operaciones_partidas(funcion: c.Funcion) -> int:
     locales = {p.nombre for p in funcion.parametros}
     bloques = list(c.todos_los_bloques(funcion.cuerpo))
     locales |= {s.nombre for bloque in bloques for s in bloque.items if isinstance(s, c.Decl)}
-    return sum(
-        _es_continuacion_de_la_operacion(primera, segunda, locales)
-        for bloque in bloques
-        for primera, segunda in itertools.pairwise(bloque.items)
-    )
+    total = 0
+    for bloque in bloques:
+        for inicio, sentencia in enumerate(bloque.items):
+            nombre = _variable_que_asigna(sentencia, locales)
+            if nombre is not None and _tiene_continuacion(bloque.items, inicio, nombre):
+                total += 1
+    return total
 
 
 def motivo_de_descarte_nuevo(variante: c.Funcion, partidas_base: int) -> str | None:

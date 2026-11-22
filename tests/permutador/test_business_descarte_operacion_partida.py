@@ -73,9 +73,9 @@ def test_la_segunda_sentencia_que_no_lee_la_variable_no_es_una_operacion_partida
     assert partidas("v = a;", "v = 5;") == 0
 
 
-def test_variables_distintas_o_sentencias_no_consecutivas_no_son_una_operacion_partida() -> None:
+def test_variables_distintas_o_una_llamada_entre_medias_no_son_una_operacion_partida() -> None:
     assert partidas("v = a;", "a = v >> 1;") == 0
-    assert partidas("v = a;", "D_global = 1;", "v = v >> 1;") == 0
+    assert partidas("v = a;", "g(b);", "v = v >> 1;") == 0
 
 
 def test_una_variable_global_no_es_una_operacion_partida() -> None:
@@ -85,7 +85,6 @@ def test_una_variable_global_no_es_una_operacion_partida() -> None:
 def test_solo_cuentan_las_sentencias_de_expresion_con_destino_simple() -> None:
     assert partidas("v = a;", "if (b) {", "    D_otra = 1;", "}") == 0
     assert partidas("g(a);", "v = v >> 1;") == 0
-    assert partidas("v += a;", "v = v >> 1;") == 0
     assert partidas("p->valor = a;", "p->valor = p->valor >> 1;") == 0
 
 
